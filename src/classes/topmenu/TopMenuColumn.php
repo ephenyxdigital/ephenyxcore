@@ -935,7 +935,7 @@ class TopMenuColumn extends PhenyxObjectModel {
 
         case 8:
 
-            if (!empty($objectData['name'])) {
+            if (!empty($objectData['name']) && is_string($objectData['name'])) {
                 $return .= htmlentities($objectData['name'], ENT_COMPAT, 'UTF-8');
             } else {
                 $return .= $context->translations->getClassTranslation('Image without label', 'TopMenu');
@@ -1201,7 +1201,7 @@ class TopMenuColumn extends PhenyxObjectModel {
 
             }
 
-            if (!empty($objectData['link'])) {
+            if (!empty($objectData['link']) && is_string($objectData['link'])) {
                 $url .= htmlentities($objectData['link'], ENT_COMPAT, 'UTF-8');
             } else {
                 $linkNotClickable = true;
@@ -1211,7 +1211,7 @@ class TopMenuColumn extends PhenyxObjectModel {
         case 9:
             $page = new Meta($objectData['id_specific_page'], (int) $context->cookie->id_lang);
 
-            if (!empty($objectData['name'])) {
+            if (!empty($objectData['name']) && is_string($objectData['name'])) {
                 $name .= htmlentities($objectData['name'], ENT_COMPAT, 'UTF-8');
             } else {
 
@@ -1249,7 +1249,7 @@ class TopMenuColumn extends PhenyxObjectModel {
 
             if (!$objectData['have_image']) {
 
-                if (!empty($objectData['name'])) {
+                if (!empty($objectData['name']) && is_string($objectData['name'])) {
                     $name = htmlentities($objectData['name'], ENT_COMPAT, 'UTF-8');
                 }
 

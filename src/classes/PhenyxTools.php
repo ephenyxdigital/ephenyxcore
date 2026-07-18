@@ -41,6 +41,9 @@ class PhenyxTools {
 
 	public $license_key;
 
+	/** @var string Dernière erreur SQL rencontrée par une fonction de maintenance (premier échec). */
+	public $lastError = '';
+
 	public function __construct() {
 
 		$this->context = Context::getContext();
@@ -674,6 +677,134 @@ class PhenyxTools {
 		return $string;
 	}
 
+	/**
+	 * ───────────────────────────────────────────────────────────────────────
+	 * Helpers de maintenance de schéma — idempotents et gardés.
+	 *
+	 * En MySQL, les ALTER TABLE (DROP/ADD PRIMARY KEY, DROP/ADD INDEX) font un
+	 * COMMIT implicite : ils ne sont PAS annulables par ROLLBACK. La seule
+	 * protection fiable est donc de ne jamais exécuter une opération qui
+	 * échouerait sur l'état courant (supprimer un index absent, ajouter une clé
+	 * déjà présente). Conséquence : une fonction de maintenance ne s'interrompt
+	 * plus en laissant la table sans clé primaire, et peut être relancée sans
+	 * provoquer d'erreur — plus besoin de restaurer la table d'origine.
+	 * ───────────────────────────────────────────────────────────────────────
+	 *
+	 * @param string $table nom de table SANS préfixe
+	 * @param string $index nom d'index ('PRIMARY' = clé primaire)
+	 */
+	public function indexExists($table, $index) {
+
+		$count = Db::getInstance()->getValue(
+			'SELECT COUNT(*) FROM information_schema.STATISTICS'
+			. ' WHERE TABLE_SCHEMA = \'' . _DB_NAME_ . '\''
+			. ' AND TABLE_NAME = \'' . _DB_PREFIX_ . pSQL($table) . '\''
+			. ' AND INDEX_NAME = \'' . pSQL($index) . '\''
+		);
+
+		return (int) $count > 0;
+	}
+
+	public function primaryKeyExists($table) {
+
+		return $this->indexExists($table, 'PRIMARY');
+	}
+
+	public function dropIndexIfExists($table, $index) {
+
+		if (!$this->indexExists($table, $index)) {
+			return true;
+		}
+
+		return $this->runSql('ALTER TABLE `' . _DB_PREFIX_ . bqSQL($table) . '` DROP INDEX `' . bqSQL($index) . '`');
+	}
+
+	public function dropPrimaryKeyIfExists($table) {
+
+		if (!$this->primaryKeyExists($table)) {
+			return true;
+		}
+
+		return $this->runSql('ALTER TABLE `' . _DB_PREFIX_ . bqSQL($table) . '` DROP PRIMARY KEY');
+	}
+
+	public function addPrimaryKeyIfMissing($table, $columns) {
+
+		if ($this->primaryKeyExists($table)) {
+			return true;
+		}
+
+		return $this->runSql('ALTER TABLE `' . _DB_PREFIX_ . bqSQL($table) . '` ADD PRIMARY KEY (' . $columns . ')');
+	}
+
+	public function addIndexIfMissing($table, $index, $columns, $unique = false) {
+
+		if ($this->indexExists($table, $index)) {
+			return true;
+		}
+
+		return $this->runSql('ALTER TABLE `' . _DB_PREFIX_ . bqSQL($table) . '` ADD ' . ($unique ? 'UNIQUE' : 'INDEX') . ' `' . bqSQL($index) . '` (' . $columns . ')');
+	}
+
+	/**
+	 * Met la colonne en AUTO_INCREMENT. À appeler APRÈS que la clé primaire
+	 * existe (une colonne AUTO_INCREMENT doit être indexée).
+	 */
+	public function setAutoIncrement($table, $column, $definition = 'INT(10) UNSIGNED NOT NULL') {
+
+		return $this->runSql('ALTER TABLE `' . _DB_PREFIX_ . bqSQL($table) . '` CHANGE `' . bqSQL($column) . '` `' . bqSQL($column) . '` ' . $definition . ' AUTO_INCREMENT');
+	}
+
+	/**
+	 * Retire l'attribut AUTO_INCREMENT (nécessaire avant de pouvoir DROP la PK).
+	 */
+	public function removeAutoIncrement($table, $column, $definition = 'INT(10) UNSIGNED NOT NULL') {
+
+		return $this->runSql('ALTER TABLE `' . _DB_PREFIX_ . bqSQL($table) . '` CHANGE `' . bqSQL($column) . '` `' . bqSQL($column) . '` ' . $definition);
+	}
+
+	/**
+	 * Exécute une requête, accumule le résultat et MÉMORISE le 1er échec
+	 * (requête + message SQL) dans $this->lastError pour pouvoir le remonter à
+	 * l'utilisateur. $result reste un booléen ET-accumulé.
+	 */
+	/**
+	 * Exécute une requête et mémorise le 1er échec (message SQL + requête) dans
+	 * $this->lastError. Retourne le booléen de succès (sans accumuler).
+	 */
+	public function runSql($sql) {
+
+		$ok = (bool) Db::getInstance()->execute($sql);
+
+		if (!$ok && $this->lastError === '') {
+			$this->lastError = Db::getInstance()->getMsgError() . ' — SQL: ' . $sql;
+		}
+
+		return $ok;
+	}
+
+	/**
+	 * Idem runSql() mais accumule le résultat global dans $result (ET booléen).
+	 */
+	public function exec($sql, &$result) {
+
+		$ok = $this->runSql($sql);
+		$result = ((bool) $result) && $ok;
+
+		return $ok;
+	}
+
+	public function tableExists($table) {
+
+		$count = Db::getInstance()->getValue(
+			'SELECT COUNT(*) FROM information_schema.TABLES'
+			. ' WHERE TABLE_SCHEMA = \'' . _DB_NAME_ . '\''
+			. ' AND TABLE_NAME = \'' . _DB_PREFIX_ . pSQL($table) . '\''
+		);
+
+		return (int) $count > 0;
+	}
+
 	public function cleanBackTabs() {
 
 		$today = date("Y-m-d");
@@ -686,92 +817,112 @@ class PhenyxTools {
 			return true;
 		}
 
-		$query = 'SELECT id_back_tab, class_name  FROM `' . _DB_PREFIX_ . 'back_tab` ORDER BY id_back_tab ASC';
-		$tabClasses = Db::getInstance()->executeS($query);
+		$this->lastError = '';
+		$result = true;
+
+		// ── 1) Suppression des onglets obsolètes — version SÉCURISÉE.
+		//    On ne supprime QUE les onglets : sans plugin associé, sans enfants,
+		//    dont le nom ne contient pas 'Parent', ET dont la classe contrôleur
+		//    est introuvable. Évite de détruire les onglets de plugins (dont la
+		//    classe peut ne pas être chargée pendant la maintenance) et les
+		//    nœuds parents du menu.
+		$tabClasses = Db::getInstance()->executeS(
+			'SELECT `id_back_tab`, `class_name`, `plugin` FROM `' . _DB_PREFIX_ . 'back_tab` ORDER BY `id_back_tab` ASC'
+		);
 
 		foreach ($tabClasses as $tablasse) {
 
 			if (class_exists($tablasse['class_name'] . 'Controller')) {
 				continue;
-			} else {
-
-				if (str_contains($tablasse['class_name'], 'Parent')) {
-					continue;
-				} else {
-					$bckTab = new BackTab($tablasse['id_back_tab']);
-					$bckTab->delete();
-					$id_meta = Meta::getIdMetaByPage(strtolower($tablasse['class_name']));
-
-					if ($id_meta > 0) {
-						$meta = new Meta($id_meta);
-						$meta->delete();
-					}
-
-				}
-
 			}
 
-		}
+			if (str_contains($tablasse['class_name'], 'Parent')) {
+				continue;
+			}
 
-		$idLang = $this->context->language->id;
+			if (!empty($tablasse['plugin'])) {
+				continue;
+			}
 
-		$result = true;
-
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'back_tab` CHANGE `id_back_tab` `id_back_tab` INT(10) UNSIGNED NOT NULL';
-		$result &= Db::getInstance()->execute($sql);
-
-		$query = 'SELECT id_back_tab  FROM `' . _DB_PREFIX_ . 'back_tab` ORDER BY id_back_tab ASC';
-		$tabClasses = Db::getInstance()->executeS($query);
-
-		$maxIndex = Db::getInstance(_EPH_USE_SQL_SLAVE_)->getValue(
-			(new DbQuery())
-				->select('MAX(`id_back_tab`) + 1')
-				->from('back_tab')
-		);
-
-		foreach ($tabClasses as $tab) {
-
-			$sql = 'UPDATE `' . _DB_PREFIX_ . 'back_tab` SET `id_back_tab` = ' . $maxIndex . ' WHERE `id_back_tab` = ' . $tab['id_back_tab'];
-			$result &= Db::getInstance()->execute($sql);
-			$sql = 'UPDATE `' . _DB_PREFIX_ . 'back_tab_lang` SET id_back_tab = ' . $maxIndex . ' WHERE id_back_tab = ' . $tab['id_back_tab'];
-			$result &= Db::getInstance()->execute($sql);
-			$sql = 'UPDATE `' . _DB_PREFIX_ . 'employee_access` SET `id_back_tab` = ' . $maxIndex . ' WHERE `id_back_tab` = ' . $tab['id_back_tab'];
-			$result &= Db::getInstance()->execute($sql);
-			$maxIndex++;
-
-		}
-
-		$query = 'SELECT id_back_tab  FROM `' . _DB_PREFIX_ . 'back_tab` ORDER BY id_back_tab ASC';
-
-		$tabs = Db::getInstance()->executeS($query);
-
-		$i = 1;
-
-		foreach ($tabs as $tab) {
-
-			$parents = Db::getInstance()->executes(
+			$hasChildren = (int) Db::getInstance()->getValue(
 				(new DbQuery())
-					->select('`id_back_tab`')
+					->select('COUNT(*)')
 					->from('back_tab')
-					->where('`id_parent` = ' . (int) $tab['id_back_tab'])
+					->where('`id_parent` = ' . (int) $tablasse['id_back_tab'])
 			);
 
-			foreach ($parents as $parent) {
-				$sql = 'UPDATE `' . _DB_PREFIX_ . 'back_tab` SET id_parent = ' . $i . ' WHERE id_back_tab = ' . $parent['id_back_tab'];
-				$result &= Db::getInstance()->execute($sql);
+			if ($hasChildren > 0) {
+				continue;
 			}
 
-			$sql = 'UPDATE `' . _DB_PREFIX_ . 'back_tab` SET id_back_tab = ' . $i . ' WHERE id_back_tab = ' . $tab['id_back_tab'];
-			$result &= Db::getInstance()->execute($sql);
-			$sql = 'UPDATE `' . _DB_PREFIX_ . 'back_tab_lang` SET id_back_tab = ' . $i . ' WHERE id_back_tab = ' . $tab['id_back_tab'];
-			$result &= Db::getInstance()->execute($sql);
-			$sql = 'UPDATE `' . _DB_PREFIX_ . 'employee_access` SET id_back_tab = ' . $i . ' WHERE id_back_tab = ' . $tab['id_back_tab'];
-			$result &= Db::getInstance()->execute($sql);
-			$i++;
+			$bckTab = new BackTab($tablasse['id_back_tab']);
+			$bckTab->delete();
+			$id_meta = Meta::getIdMetaByPage(strtolower($tablasse['class_name']));
+
+			if ($id_meta > 0) {
+				$meta = new Meta($id_meta);
+				$meta->delete();
+			}
+
 		}
 
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'back_tab` CHANGE `id_back_tab` `id_back_tab` INT(10) UNSIGNED NOT NULL AUTO_INCREMENT';
-		$result &= Db::getInstance()->execute($sql);
+		// ── 2) Renumérotation contiguë des id_back_tab EN PRÉSERVANT la hiérarchie.
+		//    BUG corrigé : l'ancienne version décalait id_back_tab sans jamais
+		//    remapper id_parent → l'arborescence était détruite (id_parent
+		//    pointant vers des ids disparus). On construit une correspondance
+		//    old_id => new_id appliquée À LA FOIS à id_back_tab ET à id_parent.
+		$rows = Db::getInstance()->executeS(
+			'SELECT `id_back_tab`, `id_parent` FROM `' . _DB_PREFIX_ . 'back_tab` ORDER BY `id_back_tab` ASC'
+		);
+
+		$map = [];
+		$new = 1;
+		$maxId = 0;
+
+		foreach ($rows as $row) {
+			$oldId = (int) $row['id_back_tab'];
+			$map[$oldId] = $new;
+			$new++;
+
+			if ($oldId > $maxId) {
+				$maxId = $oldId;
+			}
+		}
+
+		// Offset garanti supérieur à tous les ids existants : aucune collision
+		// pendant la transition.
+		$offset = $maxId + 1;
+		$hasAccess = $this->tableExists('employee_access');
+
+		// Retrait de l'AUTO_INCREMENT pour réassigner librement (la PK reste).
+		$this->exec('ALTER TABLE `' . _DB_PREFIX_ . 'back_tab` CHANGE `id_back_tab` `id_back_tab` INT(10) UNSIGNED NOT NULL', $result);
+
+		// Phase A : tout vers (new_id + offset) ; id_parent remappé identiquement.
+		foreach ($rows as $row) {
+			$oldId = (int) $row['id_back_tab'];
+			$oldParent = (int) $row['id_parent'];
+			$tmpId = $map[$oldId] + $offset;
+			$tmpParent = ($oldParent > 0 && isset($map[$oldParent])) ? ($map[$oldParent] + $offset) : $oldParent;
+
+			$this->exec('UPDATE `' . _DB_PREFIX_ . 'back_tab` SET `id_back_tab` = ' . $tmpId . ', `id_parent` = ' . $tmpParent . ' WHERE `id_back_tab` = ' . $oldId, $result);
+			$this->exec('UPDATE `' . _DB_PREFIX_ . 'back_tab_lang` SET `id_back_tab` = ' . $tmpId . ' WHERE `id_back_tab` = ' . $oldId, $result);
+
+			if ($hasAccess) {
+				$this->exec('UPDATE `' . _DB_PREFIX_ . 'employee_access` SET `id_back_tab` = ' . $tmpId . ' WHERE `id_back_tab` = ' . $oldId, $result);
+			}
+		}
+
+		// Phase B : retrait de l'offset → ids finaux 1..n, hiérarchie intacte.
+		$this->exec('UPDATE `' . _DB_PREFIX_ . 'back_tab` SET `id_back_tab` = `id_back_tab` - ' . $offset . ' WHERE `id_back_tab` > ' . $offset, $result);
+		$this->exec('UPDATE `' . _DB_PREFIX_ . 'back_tab` SET `id_parent` = `id_parent` - ' . $offset . ' WHERE `id_parent` > ' . $offset, $result);
+		$this->exec('UPDATE `' . _DB_PREFIX_ . 'back_tab_lang` SET `id_back_tab` = `id_back_tab` - ' . $offset . ' WHERE `id_back_tab` > ' . $offset, $result);
+
+		if ($hasAccess) {
+			$this->exec('UPDATE `' . _DB_PREFIX_ . 'employee_access` SET `id_back_tab` = `id_back_tab` - ' . $offset . ' WHERE `id_back_tab` > ' . $offset, $result);
+		}
+
+		// Remise de l'AUTO_INCREMENT (la PK est intacte).
+		$this->exec('ALTER TABLE `' . _DB_PREFIX_ . 'back_tab` CHANGE `id_back_tab` `id_back_tab` INT(10) UNSIGNED NOT NULL AUTO_INCREMENT', $result);
 
 		if ($result && $this->context->cache_enable && is_object($this->context->cache_api)) {
 			$this->context->cache_api->cleanByStartingKey('generateTabs_');
@@ -789,24 +940,83 @@ class PhenyxTools {
 	public function getLegitimeMeta() {
 
 		$controllers = [];
+
+		// (1) Comportement historique : Meta::getPages() capte correctement les
+		//     pages dont la classe est déjà chargée (via Reflection).
 		$ctrls = Meta::getPages();
 
-		foreach ($ctrls as $key => $ctrl) {
+		if (is_array($ctrls)) {
 
-			foreach ($ctrl as $k => $value) {
+			foreach ($ctrls as $ctrl) {
 
-				if (str_contains($k, '/')) {
-					$ks = explode('/', $k);
-					$controllers[] = $ks[1];
-				} else {
-					$controllers[] = $k;
+				if (!is_array($ctrl)) {
+					continue;
+				}
+
+				foreach ($ctrl as $k => $value) {
+					$controllers[] = str_contains((string) $k, '/') ? explode('/', $k)[1] : $k;
 				}
 
 			}
 
 		}
 
-		return $controllers;
+		// (2) FIABILISATION : scan DIRECT des fichiers contrôleurs, par nom de
+		//     fichier, SANS Reflection ni chargement de classe. Indispensable en
+		//     contexte de maintenance où la plupart des classes ne sont pas
+		//     chargées (sinon getPages() renvoie une liste tronquée et cleanMetas
+		//     supprimait des métas valides).
+		//     Token = nom de fichier sans 'Controller.php' en minuscules :
+		//       CategoryController.php      -> 'category'
+		//       AdminPhlinksController.php  -> 'adminphlinks'
+		//     ce qui correspond au champ meta.page.
+		$scan = [];
+
+		$coreDirs = [
+			_EPH_CORE_DIR_ . '/includes/controllers/front/',
+			_EPH_CORE_DIR_ . '/includes/controllers/backend/',
+			_EPH_CORE_DIR_ . '/includes/specific_controllers/',
+		];
+
+		foreach ($coreDirs as $dir) {
+
+			if (is_dir($dir)) {
+				$scan = array_merge($scan, (array) Tools::scandir($dir, 'php', '', true));
+			}
+
+		}
+
+		foreach (Plugin::getPluginsInstalled() as $plugin) {
+
+			foreach ([_EPH_PLUGIN_DIR_, _EPH_SPECIFIC_PLUGIN_DIR_] as $base) {
+				$dir = $base . $plugin['name'];
+
+				if (is_dir($dir)) {
+					$scan = array_merge($scan, (array) Tools::scandir($dir, 'php', '', true));
+				}
+
+			}
+
+		}
+
+		foreach ($scan as $file) {
+			$base = basename($file);
+
+			if ($base === 'index.php') {
+				continue;
+			}
+
+			$name = preg_replace('/Controller\.php$/i', '', $base);
+
+			// On ne retient que les fichiers *Controller.php.
+			if ($name === $base) {
+				continue;
+			}
+
+			$controllers[] = strtolower($name);
+		}
+
+		return array_values(array_unique(array_filter($controllers)));
 
 	}
 
@@ -823,11 +1033,8 @@ class PhenyxTools {
 
 		$result = true;
 
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'guest` CHANGE `id_guest` `id_guest` INT(10) UNSIGNED NOT NULL';
-		$result &= Db::getInstance()->execute($sql);
-
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'guest` DROP PRIMARY KEY';
-		$result &= Db::getInstance()->execute($sql);
+		$result &= $this->removeAutoIncrement('guest', 'id_guest');
+		$result &= $this->dropPrimaryKeyIfExists('guest');
 
 		$query = 'SELECT id_guest  FROM `' . _DB_PREFIX_ . 'guest` ORDER BY id_guest ASC';
 
@@ -840,11 +1047,11 @@ class PhenyxTools {
 
 		foreach ($guests as $guest) {
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'guest` SET `id_guest` = ' . $maxIndex . ' WHERE `id_guest` = ' . $guest['id_guest'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'guest_meta` SET `id_guest` = ' . $maxIndex . ' WHERE `id_guest` = ' . $guest['id_guest'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'connections` SET `id_guest` = ' . $maxIndex . ' WHERE `id_guest` = ' . $guest['id_guest'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 			Hook::getInstance()->exec('updateGuestIndex', ['index' => $maxIndex, 'id_guest' => $guest['id_guest']]);
 			$maxIndex++;
 		}
@@ -856,18 +1063,18 @@ class PhenyxTools {
 
 		foreach ($guests as $guest) {
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'guest` SET `id_guest` = ' . $i . ' WHERE `id_guest` = ' . $guest['id_guest'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'guest_meta` SET `id_guest` = ' . $i . ' WHERE `id_guest` = ' . $guest['id_guest'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'connections` SET `id_guest` = ' . $i . ' WHERE `id_guest` = ' . $guest['id_guest'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 			Hook::getInstance()->exec('updateGuestIndex', ['index' => $i, 'id_guest' => $guest['id_guest']]);
 
 			$i++;
 		}
 
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'guest` CHANGE `id_guest` `id_guest` INT(10) UNSIGNED NOT NULL AUTO_INCREMENT, ADD PRIMARY KEY (`id_guest`)';
-		$result &= Db::getInstance()->execute($sql);
+		$result &= $this->addPrimaryKeyIfMissing('guest', '`id_guest`');
+		$result &= $this->setAutoIncrement('guest', 'id_guest');
 
 		if ($result) {
 			$this->context->phenyxConfig->updateValue('GUEST_MAINTENANCE', date("Y-m-d"));
@@ -878,6 +1085,13 @@ class PhenyxTools {
 	}
 
 	public function cleanConfiguration() {
+
+		// $result doit être initialisé AVANT la première boucle : elle fait
+		// déjà $result &= ... (suppression des configuration_lang orphelins).
+		// Auparavant l'init était placée après cette boucle, ce qui (1) émettait
+		// un warning "undefined variable" et (2) écrasait/masquait le résultat
+		// des suppressions d'orphelins.
+		$result = true;
 
 		$query = 'SELECT id_configuration  FROM `' . _DB_PREFIX_ . 'configuration_lang` ORDER BY id_configuration ASC';
 		$configurations = Db::getInstance()->executeS($query);
@@ -892,18 +1106,13 @@ class PhenyxTools {
 
 			if (!$parent) {
 				$sql = 'DELETE FROM `' . _DB_PREFIX_ . 'configuration_lang` WHERE id_configuration = ' . $configuration['id_configuration'];
-				$result &= Db::getInstance()->execute($sql);
+				$this->exec($sql, $result);
 			}
 
 		}
 
-		$result = true;
-
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'configuration` CHANGE `id_configuration` `id_configuration` INT(10) UNSIGNED NOT NULL';
-		$result &= Db::getInstance()->execute($sql);
-
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'configuration` DROP PRIMARY KEY';
-		$result &= Db::getInstance()->execute($sql);
+		$result &= $this->removeAutoIncrement('configuration', 'id_configuration');
+		$result &= $this->dropPrimaryKeyIfExists('configuration');
 
 		$query = 'SELECT id_configuration  FROM `' . _DB_PREFIX_ . 'configuration` ORDER BY id_configuration ASC';
 
@@ -916,9 +1125,9 @@ class PhenyxTools {
 
 		foreach ($configurations as $configuration) {
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'configuration` SET `id_configuration` = ' . $maxIndex . ' WHERE `id_configuration` = ' . $configuration['id_configuration'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'configuration_lang` SET `id_configuration` = ' . $maxIndex . ' WHERE `id_configuration` = ' . $configuration['id_configuration'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 
 			$maxIndex++;
 		}
@@ -930,15 +1139,15 @@ class PhenyxTools {
 
 		foreach ($configurations as $configuration) {
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'configuration` SET `id_configuration` = ' . $i . ' WHERE `id_configuration` = ' . $configuration['id_configuration'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'configuration_lang` SET `id_configuration` = ' . $i . ' WHERE `id_configuration` = ' . $configuration['id_configuration'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 
 			$i++;
 		}
 
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'configuration` CHANGE `id_configuration` `id_configuration` INT(10) UNSIGNED NOT NULL AUTO_INCREMENT, ADD PRIMARY KEY (`id_configuration`)';
-		$result &= Db::getInstance()->execute($sql);
+		$result &= $this->addPrimaryKeyIfMissing('configuration', '`id_configuration`');
+		$result &= $this->setAutoIncrement('configuration', 'id_configuration');
 
 		if ($result) {
 			$this->context->phenyxConfig->updateValue('CONFIGURATION_MAINTENANCE', date("Y-m-d"));
@@ -955,21 +1164,45 @@ class PhenyxTools {
 		$legitimeMetas = $this->getLegitimeMeta();
 		$idLang = $this->context->language->id;
 
-		$query = 'SELECT id_meta, page  FROM `' . _DB_PREFIX_ . 'meta` ORDER BY id_meta ASC';
+		$metas = Db::getInstance()->executeS(
+			'SELECT `id_meta`, `page`, `plugin` FROM `' . _DB_PREFIX_ . 'meta` ORDER BY `id_meta` ASC'
+		);
 
-		$metas = Db::getInstance()->executeS($query);
+		// ── Suppression DÉFENSIVE des métas parasites.
+		//    getLegitimeMeta() s'appuie sur Meta::getPages() qui lit le php_self
+		//    des contrôleurs par Reflection. En contexte de maintenance, beaucoup
+		//    de classes ne sont pas chargées → la liste « légitime » peut être
+		//    TRONQUÉE, ce qui faisait supprimer des métas valides (table meta
+		//    vidée intégralement). Deux garde-fous :
+		//      1) on ne supprime jamais une méta rattachée à un plugin ;
+		//      2) GARDE ANTI-CATASTROPHE : si la purge viserait plus de la moitié
+		//         de la table, la liste est jugée non fiable et AUCUNE suppression
+		//         n'est effectuée (on journalise la raison).
+		$toDelete = [];
 
 		foreach ($metas as $meta) {
 
 			if (in_array($meta['page'], $legitimeMetas)) {
 				continue;
-			} else {
-				$meta = new Meta($meta['id_meta']);
-				$sql = 'DELETE FROM `' . _DB_PREFIX_ . 'theme_meta` WHERE id_meta = ' . $meta->id;
-				$meta->delete();
-
 			}
 
+			if (!empty($meta['plugin'])) {
+				continue;
+			}
+
+			$toDelete[] = (int) $meta['id_meta'];
+		}
+
+		$total = count($metas);
+
+		if ($total > 0 && count($toDelete) > ($total / 2)) {
+			PhenyxLogger::addLog('cleanMetas : purge annulée par sécurité — ' . count($toDelete) . '/' . $total . ' métas auraient été supprimées (liste des pages légitimes probablement tronquée car classes non chargées).', 3);
+			$toDelete = [];
+		}
+
+		foreach ($toDelete as $idMeta) {
+			$obj = new Meta($idMeta);
+			$obj->delete();
 		}
 
 		$query = 'SELECT id_meta  FROM `' . _DB_PREFIX_ . 'theme_meta` ORDER BY id_meta ASC';
@@ -985,7 +1218,7 @@ class PhenyxTools {
 
 			if (!$parent) {
 				$sql = 'DELETE FROM `' . _DB_PREFIX_ . 'theme_meta` WHERE id_meta = ' . $themeMeta['id_meta'];
-				$result &= Db::getInstance()->execute($sql);
+				$this->exec($sql, $result);
 			}
 
 		}
@@ -1003,7 +1236,7 @@ class PhenyxTools {
 
 			if (!$parent) {
 				$sql = 'DELETE FROM `' . _DB_PREFIX_ . 'meta_lang` WHERE id_meta = ' . $metaLang['id_meta'];
-				$result &= Db::getInstance()->execute($sql);
+				$this->exec($sql, $result);
 			}
 
 		}
@@ -1019,7 +1252,7 @@ class PhenyxTools {
 
 		foreach ($theme_metas as $theme_meta) {
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'theme_meta` SET `id_theme_meta` = ' . $maxIndex . ' WHERE `id_theme_meta` = ' . $theme_meta['id_theme_meta'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 
 			$maxIndex++;
 		}
@@ -1027,19 +1260,14 @@ class PhenyxTools {
 		$query = 'SELECT id_theme_meta  FROM `' . _DB_PREFIX_ . 'theme_meta` ORDER BY id_theme_meta ASC';
 
 		$theme_metas = Db::getInstance()->executeS($query);
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'theme_meta` DROP INDEX `id_theme_2`';
-		$result &= Db::getInstance()->execute($sql);
-
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'theme_meta` DROP INDEX `id_theme`';
-		$result &= Db::getInstance()->execute($sql);
-
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'theme_meta` DROP INDEX `id_meta`';
-		$result &= Db::getInstance()->execute($sql);
+		$result &= $this->dropIndexIfExists('theme_meta', 'id_theme_2');
+		$result &= $this->dropIndexIfExists('theme_meta', 'id_theme');
+		$result &= $this->dropIndexIfExists('theme_meta', 'id_meta');
 		$i = 1;
 
 		foreach ($theme_metas as $theme_meta) {
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'theme_meta` SET `id_theme_meta` = ' . $i . ' WHERE `id_theme_meta` = ' . $theme_meta['id_theme_meta'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 
 			$i++;
 		}
@@ -1054,29 +1282,20 @@ class PhenyxTools {
 				->from('meta')
 		);
 
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'meta` CHANGE `id_meta` `id_meta` INT(10) UNSIGNED NOT NULL';
-		$result &= Db::getInstance()->execute($sql);
-
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'meta` DROP PRIMARY KEY';
-		$result &= Db::getInstance()->execute($sql);
-
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'meta` DROP INDEX `page`';
-		$result &= Db::getInstance()->execute($sql);
-
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'meta_lang` DROP PRIMARY KEY';
-		$result &= Db::getInstance()->execute($sql);
-
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'meta_lang` DROP INDEX `id_lang`';
-		$result &= Db::getInstance()->execute($sql);
+		$result &= $this->removeAutoIncrement('meta', 'id_meta');
+		$result &= $this->dropPrimaryKeyIfExists('meta');
+		$result &= $this->dropIndexIfExists('meta', 'page');
+		$result &= $this->dropPrimaryKeyIfExists('meta_lang');
+		$result &= $this->dropIndexIfExists('meta_lang', 'id_lang');
 
 		foreach ($metas as $meta) {
 
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'meta` SET `id_meta` = ' . $maxIndex . ' WHERE `id_meta` = ' . $meta['id_meta'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'meta_lang` SET `id_meta` = ' . $maxIndex . ' WHERE `id_meta` = ' . $meta['id_meta'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'theme_meta` SET `id_meta` = ' . $maxIndex . ' WHERE `id_meta` = ' . $meta['id_meta'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 
 			$maxIndex++;
 
@@ -1091,33 +1310,24 @@ class PhenyxTools {
 		foreach ($metas as $meta) {
 
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'meta` SET id_meta = ' . $i . ' WHERE id_meta = ' . $meta['id_meta'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'meta_lang` SET id_meta = ' . $i . ' WHERE id_meta = ' . $meta['id_meta'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'theme_meta` SET id_meta = ' . $i . ' WHERE id_meta = ' . $meta['id_meta'];
 
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 			$i++;
 		}
 
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'meta` CHANGE `id_meta` `id_meta` INT(10) UNSIGNED NOT NULL AUTO_INCREMENT, ADD PRIMARY KEY (`id_meta`)';
-		$result &= Db::getInstance()->execute($sql);
-
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'meta` ADD UNIQUE `page` (`page`) USING BTREE';
-		$result &= Db::getInstance()->execute($sql);
-
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'meta_lang` ADD PRIMARY KEY (`id_meta`, `id_lang`) USING BTREE';
-		$result &= Db::getInstance()->execute($sql);
-
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'meta_lang` ADD INDEX `id_lang` (`id_lang`) USING BTREE';
-		$result &= Db::getInstance()->execute($sql);
-
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'theme_meta` ADD UNIQUE `id_theme_2` (`id_theme`, `id_meta`) USING BTREE';
-		$result &= Db::getInstance()->execute($sql);
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'theme_meta` ADD INDEX `id_theme` (`id_theme`) USING BTREE';
-		$result &= Db::getInstance()->execute($sql);
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'theme_meta` ADD INDEX `id_meta` (`id_meta`) USING BTREE';
-		$result &= Db::getInstance()->execute($sql);
+		// PK d'abord, PUIS AUTO_INCREMENT (une colonne auto_increment doit être indexée).
+		$result &= $this->addPrimaryKeyIfMissing('meta', '`id_meta`');
+		$result &= $this->setAutoIncrement('meta', 'id_meta');
+		$result &= $this->addIndexIfMissing('meta', 'page', '`page`', true);
+		$result &= $this->addPrimaryKeyIfMissing('meta_lang', '`id_meta`, `id_lang`');
+		$result &= $this->addIndexIfMissing('meta_lang', 'id_lang', '`id_lang`');
+		$result &= $this->addIndexIfMissing('theme_meta', 'id_theme_2', '`id_theme`, `id_meta`', true);
+		$result &= $this->addIndexIfMissing('theme_meta', 'id_theme', '`id_theme`');
+		$result &= $this->addIndexIfMissing('theme_meta', 'id_meta', '`id_meta`');
 
 		if ($result && $this->context->cache_enable && is_object($this->context->cache_api)) {
 			$this->context->cache_api->cleanByStartingKey('metaGetPages_');
@@ -1172,15 +1382,13 @@ class PhenyxTools {
 				}
 
 				$sql = 'DELETE FROM `' . _DB_PREFIX_ . 'hook_plugin` WHERE `id_hook` = ' . $pluginhook['id_hook'] . ' AND `id_plugin` = ' . $pluginhook['id_plugin'];
-				$result &= Db::getInstance()->execute($sql);
+				$this->exec($sql, $result);
 			}
 
 		}
 
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'hook_plugin` CHANGE `id_hook_plugin` `id_hook_plugin` INT(10) UNSIGNED NOT NULL';
-		$result &= Db::getInstance()->execute($sql);
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'hook_plugin` DROP PRIMARY KEY';
-		$result &= Db::getInstance()->execute($sql);
+		$result &= $this->removeAutoIncrement('hook_plugin', 'id_hook_plugin');
+		$result &= $this->dropPrimaryKeyIfExists('hook_plugin');
 		$query = 'SELECT `id_hook_plugin`  FROM `' . _DB_PREFIX_ . 'hook_plugin` ORDER BY `id_hook_plugin` ASC';
 		$hookPlugins = Db::getInstance()->executeS($query);
 		$maxIndex = Db::getInstance(_EPH_USE_SQL_SLAVE_)->getValue(
@@ -1192,7 +1400,7 @@ class PhenyxTools {
 		foreach ($hookPlugins as $hook) {
 
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'hook_plugin` SET `id_hook_plugin` = ' . $maxIndex . ' WHERE `id_hook_plugin` = ' . $hook['id_hook_plugin'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 
 			$maxIndex++;
 
@@ -1206,14 +1414,14 @@ class PhenyxTools {
 		foreach ($hookPlugins as $hook) {
 
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'hook_plugin` SET `id_hook_plugin` = ' . $i . ' WHERE `id_hook_plugin` = ' . $hook['id_hook_plugin'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 
 			$i++;
 
 		}
 
-		$sql = 'ALTER TABLE`' . _DB_PREFIX_ . 'hook_plugin` CHANGE `id_hook_plugin` `id_hook_plugin` INT(10) UNSIGNED NOT NULL AUTO_INCREMENT, ADD PRIMARY KEY (`id_hook_plugin`)';
-		$result &= Db::getInstance()->execute($sql);
+		$result &= $this->addPrimaryKeyIfMissing('hook_plugin', '`id_hook_plugin`');
+		$result &= $this->setAutoIncrement('hook_plugin', 'id_hook_plugin');
 
 		if ($result) {
 			$this->context->phenyxConfig->updateValue('PLUGIN_HOOK_MAINTENANCE', date("Y-m-d"));
@@ -1227,14 +1435,10 @@ class PhenyxTools {
 
 		$result = true;
 
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'plugin` CHANGE `id_plugin` `id_plugin` INT(10) UNSIGNED NOT NULL';
-		$result &= Db::getInstance()->execute($sql);
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'plugin` DROP PRIMARY KEY';
-		$result &= Db::getInstance()->execute($sql);
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'plugin_access` DROP PRIMARY KEY';
-		$result &= Db::getInstance()->execute($sql);
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'plugin_group` DROP PRIMARY KEY';
-		$result &= Db::getInstance()->execute($sql);
+		$result &= $this->removeAutoIncrement('plugin', 'id_plugin');
+		$result &= $this->dropPrimaryKeyIfExists('plugin');
+		$result &= $this->dropPrimaryKeyIfExists('plugin_access');
+		$result &= $this->dropPrimaryKeyIfExists('plugin_group');
 
 		$query = 'SELECT id_plugin  FROM `' . _DB_PREFIX_ . 'plugin` ORDER BY id_plugin ASC';
 		$plugs = Db::getInstance()->executeS($query);
@@ -1246,25 +1450,25 @@ class PhenyxTools {
 
 		foreach ($plugs as $plugin) {
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'plugin` SET id_plugin = ' . $maxIndex . ' WHERE id_plugin = ' . $plugin['id_plugin'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'hook_plugin` SET id_plugin = ' . $maxIndex . '  WHERE id_plugin = ' . $plugin['id_plugin'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'hook_plugin_exceptions` SET id_plugin = ' . $maxIndex . '  WHERE id_plugin = ' . $plugin['id_plugin'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'plugin_access` SET id_plugin = ' . $maxIndex . ' WHERE id_plugin = ' . $plugin['id_plugin'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'plugin_group` SET id_plugin = ' . $maxIndex . '  WHERE id_plugin = ' . $plugin['id_plugin'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 
 			if ($this->ephenyx_shop_active) {
 				$sql = 'UPDATE `' . _DB_PREFIX_ . 'plugin_carrier` SET id_plugin = ' . $maxIndex . ' WHERE id_plugin = ' . $plugin['id_plugin'];
-				$result &= Db::getInstance()->execute($sql);
+				$this->exec($sql, $result);
 				$sql = 'UPDATE `' . _DB_PREFIX_ . 'plugin_country` SET id_plugin = ' . $maxIndex . ' WHERE id_plugin = ' . $plugin['id_plugin'];
-				$result &= Db::getInstance()->execute($sql);
+				$this->exec($sql, $result);
 				$sql = 'UPDATE `' . _DB_PREFIX_ . 'plugin_currency` SET id_plugin = ' . $maxIndex . '  WHERE id_plugin = ' . $plugin['id_plugin'];
-				$result &= Db::getInstance()->execute($sql);
+				$this->exec($sql, $result);
 				$sql = 'UPDATE `' . _DB_PREFIX_ . 'payment_mode` SET id_plugin = ' . $maxIndex . '  WHERE id_plugin = ' . $plugin['id_plugin'];
-				$result &= Db::getInstance()->execute($sql);
+				$this->exec($sql, $result);
 			}
 
 			$maxIndex++;
@@ -1278,41 +1482,38 @@ class PhenyxTools {
 		foreach ($plugins as $plugin) {
 
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'plugin` SET id_plugin = ' . $i . ', position = ' . $i . ' WHERE id_plugin = ' . $plugin['id_plugin'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'plugin_access` SET id_plugin = ' . $i . ' WHERE id_plugin = ' . $plugin['id_plugin'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'hook_plugin` SET id_plugin = ' . $i . '  WHERE id_plugin = ' . $plugin['id_plugin'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'hook_plugin_exceptions` SET id_plugin = ' . $i . '  WHERE id_plugin = ' . $plugin['id_plugin'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 
-			$result &= Db::getInstance()->execute($sql);
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'plugin_group` SET id_plugin = ' . $i . '  WHERE id_plugin = ' . $plugin['id_plugin'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 
 			if ($this->ephenyx_shop_active) {
 				$sql = 'UPDATE `' . _DB_PREFIX_ . 'plugin_carrier` SET id_plugin = ' . $i . ' WHERE id_plugin = ' . $plugin['id_plugin'];
-				$result &= Db::getInstance()->execute($sql);
+				$this->exec($sql, $result);
 				$sql = 'UPDATE `' . _DB_PREFIX_ . 'plugin_country` SET id_plugin = ' . $i . ' WHERE id_plugin = ' . $plugin['id_plugin'];
-				$result &= Db::getInstance()->execute($sql);
+				$this->exec($sql, $result);
 				$sql = 'UPDATE `' . _DB_PREFIX_ . 'plugin_currency` SET id_plugin = ' . $i . '  WHERE id_plugin = ' . $plugin['id_plugin'];
-				$result &= Db::getInstance()->execute($sql);
+				$this->exec($sql, $result);
 				$sql = 'UPDATE `' . _DB_PREFIX_ . 'payment_mode` SET id_plugin = ' . $i . '  WHERE id_plugin = ' . $plugin['id_plugin'];
-				$result &= Db::getInstance()->execute($sql);
+				$this->exec($sql, $result);
 			}
 
 			$i++;
 
 		}
 
-		$sql = 'ALTER TABLE`' . _DB_PREFIX_ . 'plugin` CHANGE `id_plugin` `id_plugin` INT(10) UNSIGNED NOT NULL AUTO_INCREMENT, ADD PRIMARY KEY (`id_plugin`);';
-		$result &= Db::getInstance()->execute($sql);
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'plugin_access` ADD PRIMARY KEY(`id_profile`, `id_plugin`)';
-		$result &= Db::getInstance()->execute($sql);
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'plugin_group` ADD PRIMARY KEY(`id_plugin`, `id_group`)';
-		$result &= Db::getInstance()->execute($sql);
+		$result &= $this->addPrimaryKeyIfMissing('plugin', '`id_plugin`');
+		$result &= $this->setAutoIncrement('plugin', 'id_plugin');
+		$result &= $this->addPrimaryKeyIfMissing('plugin_access', '`id_profile`, `id_plugin`');
+		$result &= $this->addPrimaryKeyIfMissing('plugin_group', '`id_plugin`, `id_group`');
 
 		$result &= $this->resetPlugin($result);
 
@@ -1367,7 +1568,10 @@ class PhenyxTools {
 			$this->context->cache_api->cleanCache();
 		}
 
-		$this->context->_session->destroy();
+		// NE PAS détruire la session ici : resetPlugin() est appelé depuis
+		// cleanPlugins() via une requête AJAX admin. Détruire la session
+		// déconnectait l'employé en cours et faisait échouer la suite du flux.
+		// Le vidage de cache ci-dessus suffit à rafraîchir l'état des plugins.
 
 		return $result;
 
@@ -1392,7 +1596,7 @@ class PhenyxTools {
 			if (!$parent) {
 				$sql = 'DELETE FROM `' . _DB_PREFIX_ . 'hook_plugin_exceptions` WHERE id_hook = ' . $hook['id_hook'];
 
-				$result &= Db::getInstance()->execute($sql);
+				$this->exec($sql, $result);
 			}
 
 		}
@@ -1412,7 +1616,7 @@ class PhenyxTools {
 			if (!$parent) {
 				$sql = 'DELETE FROM `' . _DB_PREFIX_ . 'hook_plugin` WHERE id_hook = ' . $hook['id_hook'];
 
-				$result &= Db::getInstance()->execute($sql);
+				$this->exec($sql, $result);
 			}
 
 		}
@@ -1426,20 +1630,20 @@ class PhenyxTools {
 		foreach ($hooks as $hook) {
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'hook` SET id_hook = ' . $i . ' WHERE id_hook = ' . $hook['id_hook'];
 
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'hook_plugin_exceptions` SET id_hook = ' . $i . ' WHERE id_hook = ' . $hook['id_hook'];
 
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 
 			$sql = 'UPDATE `' . _DB_PREFIX_ . 'hook_plugin` SET id_hook = ' . $i . ' WHERE id_hook = ' . $hook['id_hook'];
-			$result &= Db::getInstance()->execute($sql);
+			$this->exec($sql, $result);
 			$i++;
 
 		}
 
 		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'hook` MODIFY `id_hook` int(10) UNSIGNED NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=' . $i . ';';
-		$result &= Db::getInstance()->execute($sql);
+		$this->exec($sql, $result);
 
 		if ($result) {
 			$this->context->phenyxConfig->updateValue('HOOK_MAINTENANCE', date("Y-m-d"));

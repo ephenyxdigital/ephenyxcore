@@ -4331,6 +4331,27 @@ abstract class Plugin {
             }
 
             break;
+		case 'meta':
+
+            if (is_null($source)) {
+                return $string;
+            }
+
+            $file = _EPH_PLUGIN_DIR_ . $this->name . '/translations/' . $iso . '/meta.php';
+
+            if (file_exists($file)) {
+                @include $file;
+                
+
+                if (!empty($_METAS[$source])) {
+                    $ret = stripslashes($_METAS[$source]);
+                } else {
+                    $ret = $string;
+                }
+
+            }
+
+            break;
 
         }
 

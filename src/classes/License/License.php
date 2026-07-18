@@ -789,7 +789,7 @@ class License extends PhenyxObjectModel {
 						$test2 = str_replace('/'.$file->getFilename(), '', $test);
                         $test = str_replace('.php', '', $test);
 												
-						if (!array_key_exists($test2, $this->iso_langs)) {
+						if (is_array($this->iso_langs) && !array_key_exists($test2, $this->iso_langs)) {
                         	if (!array_key_exists($test, $this->iso_langs)) {
                             	continue 2;
                         	}

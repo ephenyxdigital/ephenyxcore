@@ -400,6 +400,8 @@ declare module pq {
             icon?: string
             name: string
             shortcut?: string
+            shortcutStyle?: string //(css for shortcut) 11.2.0
+            span?: boolean //(title spans across both title and shortcut space) 11.2.0
             style?: string
             subItems?: Array<itemX>
             tooltop?: string
@@ -514,18 +516,19 @@ declare module pq {
             }
             editable?: boolean| (( ui: rowObject )=>boolean)
             editModel?:{
-                addDisableCls?: boolean //7.0                
+                addDisableCls?: boolean //7.0             
+                allowInvalid?: boolean   
                 //cellBorderWidth?: number
                 clicksToEdit?: number
-                pressToEdit?: boolean
+                enterMode?: boolean
                 filterKeys?: boolean
-                keyUpDown?: boolean
-                saveKey?: any
-                onSave?: 'nextFocus' | 'nextEdit' | 'downFocus' | '', //7.3.0:downFocus
-                onTab?: 'nextFocus' | 'nextEdit' | 'downFocus' | '', //7.3.0:downFocus
-                onBlur?: 'validate' | 'save' | '',
-                allowInvalid?: boolean
                 invalidClass?: string
+                pressToEdit?: boolean                
+                keyUpDown?: boolean
+                saveKey?: number | string
+                onSave?: 'nextFocus' | 'nextEdit' | 'downFocus' | '' //7.3.0:downFocus
+                onTab?: 'nextFocus' | 'nextEdit' | 'downFocus' | '' //7.3.0:downFocus
+                onBlur?: 'validate' | 'save' | ''                        
                 warnClass?: string
             }
             editor?: {
@@ -692,12 +695,14 @@ declare module pq {
             title?: string
             toolbar?: {
                 cls?: string
-                items: Array<{
+                //11.2.0: items can be array of strings.
+                items: string[] | Array<{
                     attr?: string
                     attrFile?: string //7.2
                     cls?: string                                        
                     icon?: string //can also be used with type:file(7.2)
                     init?: (ele: any)=> void//7.1
+                    items?: string[] | object[] //11.2.0
                     label?: string                    
                     listener?: any
                     options?: any[] | any
@@ -1784,6 +1789,10 @@ declare module pq {
         function sum(arr: any[], col?: any): number
         function stdev(arr: any[], col?: any): number
         function stdevp(arr: any[], col?: any): number
+    }
+    //11.2.0
+    namespace formatMenu{
+        function items(grid: pq.gridT.instance, items?: string[] | object[])
     }
     namespace excel{
         /**exports js workbook to xlsx format. */

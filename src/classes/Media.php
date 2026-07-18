@@ -946,7 +946,13 @@ class Media {
         if (isset($tag->childNodes)) {
 
             foreach ($tag->childNodes as $node) {
-                $html .= $dom->saveXML($node, LIBXML_NOEMPTYTAG);
+                // Fix: saveXML() wraps <script>/<style> text content in <![CDATA[ ... ]]>
+                // to stay well-formed XML. Browsers don't recognize CDATA markers inside
+                // an HTML <script> tag, so any inline script here fails to parse
+                // ("Unexpected token '<'") the moment this fragment is re-inserted via
+                // jQuery's .append()/domManip. saveHTML() serializes the same node
+                // without adding CDATA wrapping.
+                $html .= $dom->saveHTML($node);
             }
 
         }

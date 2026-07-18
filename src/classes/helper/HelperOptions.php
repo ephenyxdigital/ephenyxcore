@@ -584,8 +584,8 @@ class HelperOptions extends Helper {
                 'option_list'         => $optionList,
                 'current_id_lang'     => $this->context->language->id,
                 'languages'           => isset($languages) ? $languages : null,
-                'currency_left_sign'  => $this->context->currency->currency_left_sign,
-                'currency_right_sign' => $this->context->currency->currency_right_sign,
+                'currency_left_sign'  => isset($this->context->currency->currency_left_sign) ? $this->context->currency->currency_left_sign : null ,
+                'currency_right_sign' => isset($this->context->currency->currency_right_sign) ? $this->context->currency->currency_right_sign : null,
                 'controller'          => $this->controller_name,
                 'theme_path'          => _EPH_THEMES_DIR_,
                 'has_editor'          => $this->has_editor

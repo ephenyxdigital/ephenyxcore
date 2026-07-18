@@ -1106,11 +1106,15 @@ abstract class PhenyxController {
             $temp = $this->context->cache_api->getData('grid_' . $this->className . '_' . $idObjet);
 
             if (!empty($temp)) {
+                // Le sous-contrôleur a déjà configuré le singleton partagé avant
+                // d'arriver ici ; sur un hit de cache la construction est sautée,
+                // donc on nettoie pour que la grille suivante reparte propre.
+                $this->context->phenyxgrid->reset();
                 return $temp;
             }
 
         }
-        
+
         $this->context->phenyxgrid->docReady = 0;
 
         $this->context->phenyxgrid->paramClass = !empty($this->paramClassName) ? $this->paramClassName : $this->className;
@@ -1126,6 +1130,9 @@ abstract class PhenyxController {
         $this->paragridScript = $script;
 
         if ($this->is_subModel) {
+            // Grille composée : on remet le singleton à plat afin que la
+            // sous-grille suivante (ou la grille principale) reparte propre.
+            $this->context->phenyxgrid->reset();
             return $this->paragridScript;
         }
 
@@ -1134,6 +1141,9 @@ abstract class PhenyxController {
         if ($use_cache && $this->context->cache_enable) {
             $this->context->cache_api->putData('grid_' . $this->className . '_' . $idObjet, $result);
         }
+
+        // Réinitialisation systématique du singleton partagé entre deux grilles.
+        $this->context->phenyxgrid->reset();
 
         return $result;
     }

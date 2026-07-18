@@ -168,7 +168,7 @@ class Composer {
 
                 $css_animation = $s->getParameter('css_animation');
 
-                if (!empty($css_animation)) {
+                if (!empty($css_animation) && $css_animation != 'none') {
                     $css_animation = 'wpb_animate_when_almost_visible wpb_' . $css_animation . ' ' . $css_animation;
                     $class .= ' ' . $css_animation;
                 }
@@ -286,7 +286,7 @@ class Composer {
 
             $css_animation = $s->getParameter('css_animation');
 
-            if (!empty($css_animation)) {
+            if (!empty($css_animation) && $css_animation != 'none') {
                 $css_animation = 'wpb_animate_when_almost_visible wpb_' . $css_animation . ' ' . $css_animation;
                 $class .= ' ' . $css_animation;
             }

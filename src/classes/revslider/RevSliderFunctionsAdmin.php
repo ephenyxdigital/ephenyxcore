@@ -562,9 +562,6 @@ class RevSliderFunctionsAdmin extends RevSliderFunction {
 					$slider = new RevSliderSlider();
 					$slider->init_by_id($id);
 
-					// legacy WP plugin update path - removed (Phenyx slides are already v6+)
-					// $upd = new RevSliderPluginUpdate();
-					// $upd->upgrade_slider_to_latest($slider);
 					$done = true;
 				}
 

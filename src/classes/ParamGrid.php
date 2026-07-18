@@ -281,6 +281,37 @@ class ParamGrid {
 		$this->paramIdentifier = $identifier;
 	}
 
+	/**
+	 * Remet toutes les propriétés de configuration à leur valeur déclarée par défaut.
+	 *
+	 * $context->phenyxgrid est un singleton partagé sur le Context : il est créé une
+	 * seule fois (PhenyxController) puis réutilisé par chaque contrôleur qui construit
+	 * une grille. Sans remise à zéro, deux problèmes apparaissaient :
+	 *   - l'état de construction ($paragrid_option) s'accumulait via le `[]` de
+	 *     generateParaGridOption() (modèles dupliqués / structure auto-référencée) ;
+	 *   - les propriétés posées par une grille précédente (treeModel, treeExpand,
+	 *     complete, dragModel, contextMenu, groupModel, detailModel, editor…) fuyaient
+	 *     vers la grille suivante qui ne les redéfinissait pas.
+	 *
+	 * D'où des dysfonctionnements intermittents, dépendants de l'ordre de génération
+	 * (ex. AdminBackTabs : arbre bloqué fermé, nœuds non cliquables, icônes absentes),
+	 * d'autant plus persistants qu'un script corrompu pouvait être figé dans le cache
+	 * de page. Cette méthode est appelée après chaque génération (voir
+	 * PhenyxController::generateParaGridScript) pour garantir que chaque grille démarre
+	 * sur une base propre. La réflexion sur get_class_vars() garantit que tout nouveau
+	 * champ ajouté à la classe sera lui aussi réinitialisé sans maintenance manuelle.
+	 *
+	 * @return $this
+	 */
+	public function reset() {
+
+		foreach (get_class_vars(__CLASS__) as $property => $default) {
+			$this->{$property} = $default;
+		}
+
+		return $this;
+	}
+
 	public function generateParaGridOption() {
 
 		$this->paramGridObj = (!empty($this->paramGridObj)) ? $this->paramGridObj : 'obj' . $this->paramClass;
@@ -333,7 +364,12 @@ class ParamGrid {
 		// ── FIX 1 : 'showTop' appeared twice in the original; the second entry
 		//    silently overwrote the first (PHP keeps the last value for duplicate
 		//    array keys). The duplicate has been removed.
-		$this->paragrid_option['paragrids'][] = (!empty($this->paragrid_option)) ? $this->paragrid_option : [
+		// ── FIX 6 : la garde ternaire `(!empty($this->paragrid_option)) ? $this->paragrid_option : [...]`
+		//    réinjectait la structure accumulée dans elle-même dès le 2e passage
+		//    (corruption auto-référentielle + empilement via `[]`). On repart
+		//    systématiquement d'un conteneur propre puis on empile le builder courant.
+		$this->paragrid_option = ['paragrids' => []];
+		$this->paragrid_option['paragrids'][] = [
 			'paramGridVar'              => $this->paramGridVar,
 			'paramGridId'               => $this->paramGridId,
 			'paramGridObj'              => $this->paramGridObj,
