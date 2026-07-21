@@ -143,20 +143,38 @@ abstract class PhenyxAssistantLayer {
     }
 
     /**
-     * Découpe et normalise un texte libre en tokens comparables : accents
-     * retirés, minuscule, ponctuation neutralisée. Sert de base à
+     * Normalise un texte libre (minuscule, accents retirés) sans le découper
+     * — sert de base à tokenize() et au repli "sous-chaîne" de
+     * variantMatches() pour les écritures sans espaces entre les mots
+     * (chinois...).
+     *
+     * @param string $text
+     * @return string
+     */
+    protected function normalizeText($text) {
+
+        return Tools::strtolower(Tools::replaceAccentedChars((string) $text));
+    }
+
+    /**
+     * Découpe un texte libre normalisé en tokens comparables. Sert de base à
      * matchesConcept() pour un matching tolérant à l'ordre des mots — cf.
      * retour utilisateur du 2026-07-21 : "marque créer un client" doit
      * matcher aussi bien que "comment créer un client", la structure de la
      * phrase varie plus d'un employé à l'autre que le vocabulaire clé.
+     *
+     * Important : `\p{L}\p{N}` (Unicode, modificateur /u) plutôt que
+     * `a-z0-9` — sinon le russe, l'arabe, l'hébreu, le grec ou le chinois
+     * seraient entièrement vidés avant même la comparaison (cf. retour du
+     * 2026-07-21 : la boutique a onze langues installées, pas seulement des
+     * langues latines).
      *
      * @param string $text
      * @return string[]
      */
     protected function tokenize($text) {
 
-        $normalized = Tools::strtolower(Tools::replaceAccentedChars((string) $text));
-        $normalized = preg_replace('/[^a-z0-9]+/', ' ', $normalized);
+        $normalized = preg_replace('/[^\p{L}\p{N}]+/u', ' ', $this->normalizeText($text));
         $tokens = array_filter(explode(' ', trim((string) $normalized)), function ($token) {
             return $token !== '';
         });
@@ -213,6 +231,135 @@ abstract class PhenyxAssistantLayer {
         $threshold = $shortest <= 6 ? 1 : 2;
 
         return levenshtein($token, $variant) <= $threshold;
+    }
+
+    /**
+     * Est-ce qu'un mot-clé de topic (déjà normalisé) est présent dans la
+     * question, soit comme token (exact ou à une faute de frappe près, cf.
+     * isCloseEnough()), soit comme simple sous-chaîne du texte normalisé
+     * complet. Le repli en sous-chaîne sert à deux cas que le découpage par
+     * tokens ne couvre pas :
+     *  - le chinois (et les écritures sans espaces entre les mots), où
+     *    tokenize() renvoie un seul token pour toute une phrase ;
+     *  - les mots composés allemands ("Kundenliste" contient "kunde").
+     *
+     * @param string   $variant        Mot-clé normalisé (une "unité" du champ keywords)
+     * @param string[] $tokens         Résultat de tokenize() sur la question
+     * @param string   $normalizedText Résultat de normalizeText() sur la question (non découpé)
+     * @return bool
+     */
+    protected function variantMatches($variant, array $tokens, $normalizedText) {
+
+        foreach ($tokens as $token) {
+
+            if ($token === $variant || $this->isCloseEnough($token, $variant)) {
+                return true;
+            }
+
+        }
+
+        return mb_strlen($variant) >= 2 && mb_stripos($normalizedText, $variant) !== false;
+    }
+
+    /**
+     * Moteur générique pour les couches qui préfèrent stocker leur contenu
+     * en base (cf. PhenyxAssistantTopic) plutôt qu'en constantes PHP — seule
+     * façon réaliste de couvrir plusieurs langues sans dupliquer toute la
+     * logique de matching par langue dans chaque couche. Cf. retour
+     * utilisateur du 2026-07-21 : un employé anglophone ou germanophone doit
+     * pouvoir poser sa question dans sa langue.
+     *
+     * Chaque token de la question est comparé (cf. matchesConcept()) aux
+     * mots-clés de chaque topic actif dans la langue de l'employé ; le topic
+     * qui recoupe le plus de tokens gagne. Si aucun topic n'existe pour
+     * cette langue (traduction pas encore faite), on retombe sur la langue
+     * par défaut du shop plutôt que de ne rien répondre.
+     *
+     * @param PhenyxAssistantQuery $query
+     * @param string               $entityClass Cf. PhenyxAssistantTopic::$entity_class
+     * @return PhenyxAssistantAnswer|null
+     */
+    protected function matchBestTopic(PhenyxAssistantQuery $query, $entityClass) {
+
+        $tokens = $this->tokenize($query->text);
+
+        if (!$tokens) {
+            return null;
+        }
+
+        $idLang = $this->resolveLangId($query->isoCode);
+        $topics = PhenyxAssistantTopic::getActiveForLang($idLang, $entityClass);
+
+        if (!$topics) {
+            $fallbackLang = (int) Configuration::getInstance()->get('EPH_LANG_DEFAULT');
+
+            if ($fallbackLang && $fallbackLang !== $idLang) {
+                $topics = PhenyxAssistantTopic::getActiveForLang($fallbackLang, $entityClass);
+            }
+
+        }
+
+        if (!$topics) {
+            return null;
+        }
+
+        $normalizedText = $this->normalizeText($query->text);
+        $best = null;
+        $bestScore = 0;
+
+        foreach ($topics as $topic) {
+
+            $variants = preg_split('/\s+/u', trim((string) $topic['keywords']));
+            $score = 0;
+
+            foreach ($variants as $variant) {
+
+                if ($variant !== '' && $this->variantMatches($variant, $tokens, $normalizedText)) {
+                    $score++;
+                }
+
+            }
+
+            if ($score > $bestScore) {
+                $bestScore = $score;
+                $best = $topic;
+            }
+
+        }
+
+        if ($best === null || $bestScore < 1) {
+            return null;
+        }
+
+        $answer = PhenyxAssistantAnswer::text((string) $best['answer'], $this->pluginName, (float) $best['confidence']);
+        $answer->suggestedAction = !empty($best['suggested_action']) ? json_decode($best['suggested_action'], true) : null;
+        $answer->quickReplies = !empty($best['quick_replies']) ? (array) json_decode($best['quick_replies'], true) : [];
+
+        return $answer;
+    }
+
+    /**
+     * Résout le code langue de la requête (cf. PhenyxAssistantQuery::$isoCode,
+     * déjà peuplé depuis Context::getContext()->language) en id_lang, avec
+     * repli défensif sur la langue par défaut du shop — jamais d'appel direct
+     * à Language::getIdByIso() avec un code non validé, qui fait un die() en
+     * cas d'ISO invalide.
+     *
+     * @param string|null $isoCode
+     * @return int
+     */
+    protected function resolveLangId($isoCode) {
+
+        if ($isoCode && Validate::isLanguageIsoCode($isoCode)) {
+            $idLang = (int) Language::getIdByIso($isoCode);
+
+            if ($idLang) {
+                return $idLang;
+            }
+
+        }
+
+        return (int) Configuration::getInstance()->get('EPH_LANG_DEFAULT');
     }
 
 }

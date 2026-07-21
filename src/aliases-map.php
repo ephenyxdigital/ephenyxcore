@@ -172,6 +172,7 @@ return [
     'PhenyxAssistantProviderInterface' => 'EphenyxDigital\\QuantumCore\\PhenyxAssistantProviderInterface',
     'PhenyxAssistantQuery' => 'EphenyxDigital\\QuantumCore\\PhenyxAssistantQuery',
     'PhenyxAssistantRuleProvider' => 'EphenyxDigital\\QuantumCore\\PhenyxAssistantRuleProvider',
+    'PhenyxAssistantTopic' => 'EphenyxDigital\\QuantumCore\\PhenyxAssistantTopic',
     'PhenyxAssistantUserLayer' => 'EphenyxDigital\\QuantumCore\\PhenyxAssistantUserLayer',
     'PhenyxAutoload' => 'EphenyxDigital\\QuantumCore\\PhenyxAutoload',
     'PhenyxBackup' => 'EphenyxDigital\\QuantumCore\\PhenyxBackup',
