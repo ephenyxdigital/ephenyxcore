@@ -41,6 +41,7 @@
                 "src/Core/Foundation/Filesystem/",
                 "src/Core/Foundation/IoC/",
                 "src/classes/",
+                "src/classes/assistant/",
                 "src/classes/License/",
                 "src/classes/Referrer/",
                 "src/classes/cache/",
