@@ -74,7 +74,7 @@ class PhenyxAssistant {
      */
     protected function registerCoreLayers() {
 
-        $this->registerLayer(new PhenyxAssistantUserLayer());
+        $this->registerLayer(new PhenyxAssistantCoreLayer());
     }
 
     /**

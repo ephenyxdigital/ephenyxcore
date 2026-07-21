@@ -173,7 +173,7 @@ return [
     'PhenyxAssistantQuery' => 'EphenyxDigital\\QuantumCore\\PhenyxAssistantQuery',
     'PhenyxAssistantRuleProvider' => 'EphenyxDigital\\QuantumCore\\PhenyxAssistantRuleProvider',
     'PhenyxAssistantTopic' => 'EphenyxDigital\\QuantumCore\\PhenyxAssistantTopic',
-    'PhenyxAssistantUserLayer' => 'EphenyxDigital\\QuantumCore\\PhenyxAssistantUserLayer',
+    'PhenyxAssistantCoreLayer' => 'EphenyxDigital\\QuantumCore\\PhenyxAssistantCoreLayer',
     'PhenyxAutoload' => 'EphenyxDigital\\QuantumCore\\PhenyxAutoload',
     'PhenyxBackup' => 'EphenyxDigital\\QuantumCore\\PhenyxBackup',
     'PhenyxClass' => 'EphenyxDigital\\QuantumCore\\PhenyxClass',

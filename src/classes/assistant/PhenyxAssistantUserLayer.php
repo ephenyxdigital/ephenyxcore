@@ -3,54 +3,17 @@
 namespace EphenyxDigital\QuantumCore;
 
 /**
- * Class PhenyxAssistantUserLayer
+ * OBSOLÈTE depuis le 2026-07-21 — renommée en PhenyxAssistantCoreLayer
+ * (cf. classes/assistant/PhenyxAssistantCoreLayer.php dans ce même dossier)
+ * car cette couche ne se limite plus au client (entity_class 'User') mais
+ * répond désormais à tous les topics "core" du wiki (CMS, Content Anywhere,
+ * Plugins, ...) sans filtre entity_class.
  *
- * Première couche "core" de l'assistant BO : contrairement à une couche de
- * plugin (cf. PhEcommerceAssistantLayer en exemple dans le README du
- * dossier), celle-ci ne dépend d'aucun plugin. Elle documente une
- * fonctionnalité native du framework : la gestion des clients, portée par
- * la classe UserCore (table `user`) et le contrôleur natif AdminUsers
- * (includes/controllers/backend/AdminUsersController.php).
- *
- * Le contenu (questions/réponses/quick replies) vit en base — table
- * eph_phenyx_assistant_topic(_lang), cf. sql/phenyx_assistant_topic.sql et
- * install_assistant_topics.php pour le jeu de données initial (FR/EN/DE) —
- * plutôt qu'en constantes PHP : ça permet de répondre dans la langue de
- * l'employé (cf. PhenyxAssistantLayer::matchBestTopic()) sans dupliquer la
- * logique de matching pour chaque langue, et de traduire/enrichir le
- * contenu sans redéploiement.
- *
- * Enregistrée automatiquement au démarrage par
- * PhenyxAssistant::registerCoreLayers() — pas besoin qu'un plugin appelle
- * registerLayer() pour l'activer.
- *
- * @since 1.0.0 (assistant BO)
+ * Ce fichier n'est plus référencé nulle part (aliases-map.php pointe
+ * maintenant sur PhenyxAssistantCoreLayer, PhenyxAssistant::registerCoreLayers()
+ * instancie PhenyxAssistantCoreLayer) — laissé en place uniquement parce que
+ * l'outillage de cette session ne peut pas supprimer de fichier sur le
+ * répertoire connecté de Jeff. À supprimer manuellement sur le VPS lors du
+ * prochain déploiement (vendor/ephenyxdigital/quantumcore/src/classes/assistant/
+ * PhenyxAssistantUserLayer.php), puis penser à `composer dump-autoload -o`.
  */
-#[\AllowDynamicProperties]
-class PhenyxAssistantUserLayer extends PhenyxAssistantLayer {
-
-    /** @see PhenyxAssistantLayer::$entities */
-    protected $entities = ['User'];
-
-    /** @see PhenyxAssistantLayer::$sampleQuestions */
-    protected $sampleQuestions = [
-        'Comment créer un client ?',
-        'How do I create a customer?',
-        'Wie lege ich einen Kunden an?',
-    ];
-
-    /**
-     * Délègue entièrement au moteur générique de matching par topics — cf.
-     * PhenyxAssistantLayer::matchBestTopic(). Les topics 'core.user.*'
-     * (create/list/fields/clarify) sont scorés dans la langue de l'employé,
-     * avec repli sur la langue par défaut du shop si pas encore traduits.
-     *
-     * @param PhenyxAssistantQuery $query
-     * @return PhenyxAssistantAnswer|null
-     */
-    public function answer(PhenyxAssistantQuery $query) {
-
-        return $this->matchBestTopic($query, 'User');
-    }
-
-}
