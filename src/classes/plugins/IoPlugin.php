@@ -171,9 +171,6 @@ class IoPlugin extends Plugin {
 
     public static function generatePluginZip($plugin) {
 
-        $file = fopen("testgeneratePluginZip.txt", "w");
-        fwrite($file, $plugin . PHP_EOL);
-
         if (file_exists(_EPH_ROOT_DIR_ . '/plugins/' . $plugin . '.zip')) {
             unlink(_EPH_ROOT_DIR_ . '/plugins/' . $plugin . '.zip');
         }

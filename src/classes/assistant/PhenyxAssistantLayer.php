@@ -215,11 +215,26 @@ abstract class PhenyxAssistantLayer {
      * trop laxiste sur les mots courts (faux positifs), soit trop strict sur
      * les longs.
      *
+     * ⚠️ Retour Jeff 2026-07-23 (bug : la question "Gestion de la société"
+     * faisait gagner le topic core.tour.tools à cause d'un faux positif —
+     * "gestion" et "session" sont tous deux des mots de 7 lettres à
+     * distance de Levenshtein 2, donc "close enough" pour le seuil ci-dessous
+     * bien qu'ils n'aient strictement rien à voir. On exige maintenant que
+     * le premier caractère soit identique avant même de calculer la
+     * distance : une vraie faute de frappe touche presque toujours le
+     * milieu/la fin d'un mot, jamais sa première lettre — ça élimine ce
+     * genre de collision entre mots sans rapport tout en gardant la
+     * tolérance utile ("crer"/"creer", "modifer"/"modifier"...).
+     *
      * @param string $token
      * @param string $variant
      * @return bool
      */
     protected function isCloseEnough($token, $variant) {
+
+        if ($token === '' || $variant === '' || $token[0] !== $variant[0]) {
+            return false;
+        }
 
         $shortest = min(strlen($token), strlen($variant));
         $lenDiff = abs(strlen($token) - strlen($variant));
@@ -303,7 +318,50 @@ abstract class PhenyxAssistantLayer {
             return null;
         }
 
-        $normalizedText = $this->normalizeText($query->text);
+        $best = $this->findBestTopic($query->text, $topics);
+
+        if ($best === null) {
+            return null;
+        }
+
+        $answer = PhenyxAssistantAnswer::text((string) $best['answer'], $this->pluginName, (float) $best['confidence']);
+        $answer->suggestedAction = !empty($best['suggested_action']) ? json_decode($best['suggested_action'], true) : null;
+        $quickReplies = !empty($best['quick_replies']) ? (array) json_decode($best['quick_replies'], true) : [];
+
+        // Retour Jeff 2026-07-22 : certaines quick replies mènent à une action
+        // "physique" sur l'écran courant (menu contextuel simulé, bouton mis en
+        // évidence — cf. core.grid.contextmenu / core.grid.fields et
+        // renderPhenyxAssistantSuggestedAction() dans ephenyx.js). Elles n'ont
+        // aucun intérêt si l'employé n'est pas sur une liste au moment où il
+        // pose la question (ex: demande générale depuis le tableau de bord) —
+        // on les retire dans ce cas plutôt que de proposer une puce qui ne
+        // ferait rien de concret une fois cliquée.
+        $sourceType = isset($query->extra['sourceType']) ? (string) $query->extra['sourceType'] : null;
+        $answer->quickReplies = $this->filterScreenDependentQuickReplies($quickReplies, $topics, $sourceType);
+
+        return $answer;
+    }
+
+    /**
+     * Cherche, parmi $topics (lignes brutes déjà chargées pour la langue
+     * courante — cf. getActiveForLang()), celui dont les mots-clés recoupent
+     * le mieux $text. Factorisé hors de matchBestTopic() pour être réutilisé
+     * par filterScreenDependentQuickReplies() (résoudre à quel topic mènerait
+     * le clic sur une quick reply donnée, sans re-questionner la base).
+     *
+     * @param string $text   Texte à scorer (question de l'employé, ou libellé d'une quick reply)
+     * @param array  $topics Lignes brutes de PhenyxAssistantTopic::getActiveForLang()
+     * @return array|null Meilleure ligne topic, ou null si aucun recoupement
+     */
+    protected function findBestTopic($text, array $topics) {
+
+        $tokens = $this->tokenize($text);
+
+        if (!$tokens) {
+            return null;
+        }
+
+        $normalizedText = $this->normalizeText($text);
         $best = null;
         $bestScore = 0;
 
@@ -327,15 +385,46 @@ abstract class PhenyxAssistantLayer {
 
         }
 
-        if ($best === null || $bestScore < 1) {
-            return null;
+        return ($best !== null && $bestScore >= 1) ? $best : null;
+    }
+
+    /**
+     * Retire de $quickReplies celles qui, si cliquées, mèneraient à un topic
+     * dont l'action suggérée n'a de sens que sur une liste déjà ouverte (cf.
+     * ephenyx.js: 'simulateGridContextMenu' / 'highlightAndClickElement'),
+     * sauf si l'employé est justement sur une liste ($sourceType === 'list').
+     * Une quick reply qui ne résout à aucun topic connu, ou dont l'action
+     * n'est pas de ce type, est toujours conservée.
+     *
+     * @param string[] $quickReplies
+     * @param array    $topics       Lignes brutes de PhenyxAssistantTopic::getActiveForLang()
+     * @param string|null $sourceType 'list' | 'add' | 'edit' | null (cf. current_type côté JS)
+     * @return string[]
+     */
+    protected function filterScreenDependentQuickReplies(array $quickReplies, array $topics, $sourceType) {
+
+        if (!$quickReplies) {
+            return $quickReplies;
         }
 
-        $answer = PhenyxAssistantAnswer::text((string) $best['answer'], $this->pluginName, (float) $best['confidence']);
-        $answer->suggestedAction = !empty($best['suggested_action']) ? json_decode($best['suggested_action'], true) : null;
-        $answer->quickReplies = !empty($best['quick_replies']) ? (array) json_decode($best['quick_replies'], true) : [];
+        $screenDependentTypes = ['simulateGridContextMenu', 'highlightAndClickElement'];
 
-        return $answer;
+        return array_values(array_filter($quickReplies, function ($replyText) use ($topics, $sourceType, $screenDependentTypes) {
+
+            $topic = $this->findBestTopic((string) $replyText, $topics);
+
+            if (!$topic || empty($topic['suggested_action'])) {
+                return true;
+            }
+
+            $action = json_decode($topic['suggested_action'], true);
+
+            if (empty($action['type']) || !in_array($action['type'], $screenDependentTypes, true)) {
+                return true;
+            }
+
+            return $sourceType === 'list';
+        }));
     }
 
     /**

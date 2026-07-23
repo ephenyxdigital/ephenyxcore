@@ -117,8 +117,31 @@ class HelperForm extends Helper {
         $categories = true;
         $color = true;
         $date = true;
-        $tinymce = true;
         $textareaAutosize = true;
+
+        // Un contrôleur déclare 'tinymce' => true|false au même niveau que
+        // 'legend'/'input'/'submit' dans $this->fields_form (cf.
+        // AdminCmsController, AdminContentAnyWhereController...). Une fois
+        // wrappé (cas simple : [['form' => $this->fields_form]], cas
+        // multi-fieldsets : chaque entrée a déjà son propre ['form' => ...]),
+        // ce drapeau se retrouve à $fieldset['form']['tinymce'] — jusqu'ici
+        // jamais relu ici, d'où $tinymce toujours forcé à true même quand le
+        // contrôleur ne le déclare pas du tout (cf. AdminPhenyxAssistantsController,
+        // qui n'a pas de textarea nécessitant du rich text). Défaut désormais
+        // à false : un contrôleur doit déclarer explicitement 'tinymce' => true
+        // (comme AdminCmsController) pour l'activer — sinon closeFormObject(...,
+        // true) dans ephenyx.js tente de nettoyer des éditeurs tinymce.editors
+        // qui n'existent pas et plante. Dernière valeur explicite rencontrée
+        // gagne si plusieurs fieldsets la déclarent.
+        $tinymce = false;
+
+        foreach ($this->fields_form as $fieldsetForTinymce) {
+
+            if (isset($fieldsetForTinymce['form']['tinymce'])) {
+                $tinymce = (bool) $fieldsetForTinymce['form']['tinymce'];
+            }
+
+        }
 
         $languages = $this->languages;
 

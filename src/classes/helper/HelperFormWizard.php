@@ -38,8 +38,17 @@ class HelperFormWizard extends HelperForm {
         $categories = true;
         $color = true;
         $date = true;
-        $tinymce = true;
         $textareaAutosize = true;
+
+        // Cf. HelperForm::generate() — même défaut désormais à false tant
+        // que le contrôleur ne déclare pas explicitement 'tinymce' => true.
+        // Contrairement à HelperForm, un wizard n'a qu'un seul niveau de
+        // $this->fields_form (pas de wrapping ['form' => ...] par fieldset) :
+        // le drapeau se déclare donc directement en sibling de 'steps' (cf.
+        // AdminLanguagesController::renderForm(), $this->fields_form =
+        // ['tinymce' => true, 'steps' => [...]]).
+        $tinymce = isset($this->fields_form['tinymce']) ? (bool) $this->fields_form['tinymce'] : false;
+
         foreach ($this->fields_form['steps'] as $fieldsetKey => &$fieldset) {
 
             

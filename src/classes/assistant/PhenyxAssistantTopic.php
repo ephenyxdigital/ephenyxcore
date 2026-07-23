@@ -96,7 +96,7 @@ class PhenyxAssistantTopic extends PhenyxObjectModel {
             /* Lang fields */
             'keywords'      => ['type' => self::TYPE_STRING, 'size' => 500, 'lang' => true, 'required' => true],
             'answer'        => ['type' => self::TYPE_HTML, 'lang' => true, 'required' => true],
-            'quick_replies' => ['type' => self::TYPE_STRING, 'size' => 500, 'lang' => true],
+            'quick_replies' => ['type' => self::TYPE_STRING, 'lang' => true],
         ],
     ];
 
@@ -145,10 +145,73 @@ class PhenyxAssistantTopic extends PhenyxObjectModel {
                 $id, $idLang, $this, $this->def, false,
                 $this->dbUser, $this->dbPasswd, $this->dbName, $this->dbServer
             );
+            $this->unpackJsonFields();
         }
 
         if ($idLang !== null) {
             $this->id_lang = (Language::getLanguage($idLang) !== false) ? $idLang : $this->context->phenyxConfig->get('EPH_LANG_DEFAULT');
+        }
+
+    }
+
+    /**
+     * Décode en tableau PHP les champs stockés en JSON brut, juste après le
+     * chargement — convention habituelle de Jeff pour les champs JSON d'un
+     * PhenyxObjectModel : décodage à la construction, ré-encodage dans
+     * add()/update() (cf. packJsonFields()).
+     *
+     * - suggested_action : champ simple (non lang), toujours scalaire.
+     * - quick_replies : champ lang, donc soit un tableau [$idLang => json],
+     *   soit un scalaire json si l'objet a été chargé pour un $idLang précis
+     *   (cf. Adapter_EntityMapper::load()) — les deux cas sont gérés.
+     *
+     * @return void
+     */
+    protected function unpackJsonFields() {
+
+        if (!is_null($this->suggested_action) && is_string($this->suggested_action) && Validate::isJSON($this->suggested_action)) {
+            $this->suggested_action = Tools::jsonDecode($this->suggested_action, true);
+        }
+
+        if (is_array($this->quick_replies)) {
+
+            foreach ($this->quick_replies as $idLang => $value) {
+
+                if (!is_null($value) && is_string($value) && Validate::isJSON($value)) {
+                    $this->quick_replies[$idLang] = Tools::jsonDecode($value, true);
+                }
+
+            }
+
+        } elseif (!is_null($this->quick_replies) && is_string($this->quick_replies) && Validate::isJSON($this->quick_replies)) {
+            $this->quick_replies = Tools::jsonDecode($this->quick_replies, true);
+        }
+
+    }
+
+    /**
+     * Ré-encode en JSON les champs décodés par unpackJsonFields(), avant
+     * écriture en base — à appeler en tout début de add()/update(), avant
+     * getFields()/getFieldsLang().
+     *
+     * @return void
+     */
+    protected function packJsonFields() {
+
+        if (is_array($this->suggested_action)) {
+            $this->suggested_action = Tools::jsonEncode($this->suggested_action);
+        }
+
+        if (is_array($this->quick_replies)) {
+
+            foreach ($this->quick_replies as $idLang => $value) {
+
+                if (is_array($value)) {
+                    $this->quick_replies[$idLang] = Tools::jsonEncode($value);
+                }
+
+            }
+
         }
 
     }
@@ -163,6 +226,8 @@ class PhenyxAssistantTopic extends PhenyxObjectModel {
      * @return bool
      */
     public function add($autoDate = true, $nullValues = false) {
+
+        $this->packJsonFields();
 
         if (isset($this->id) && !$this->force_id) {
             unset($this->id);
@@ -226,6 +291,8 @@ class PhenyxAssistantTopic extends PhenyxObjectModel {
      * @return bool
      */
     public function update($nullValues = false) {
+
+        $this->packJsonFields();
 
         if (property_exists($this, 'date_upd')) {
             $this->date_upd = date('Y-m-d H:i:s');

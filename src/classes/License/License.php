@@ -54,6 +54,14 @@ class License extends PhenyxObjectModel {
 
     protected static $instance;
 
+    /**
+     * Durée (s) en dessous de laquelle on considère plugins/langues comme
+     * "à jour" et on évite de resolliciter le site distant (getPluginOnDisk()/
+     * getInstalledLangs() hors mode forcé). Approximation volontairement
+     * prudente basée sur date_upd — pas de nouvelle colonne à migrer.
+     */
+    const REMOTE_SYNC_TTL = 3600;
+
     public $website;
     public $type;
     public $is_main;
@@ -123,6 +131,16 @@ class License extends PhenyxObjectModel {
 
         if ($this->id) {
             $partner = new Customer($this->id_customer);
+
+            // CORRIGÉ : getPluginOnDisk() / getInstalledLangs() ne sont plus
+            // appelées ici. Chacune fait une requête HTTP bloquante (jusqu'à 60s)
+            // vers le site distant, et le constructeur tourne à CHAQUE `new License()`
+            // (AdminLicencesController instancie une License pour la moindre action
+            // ajax : hideTab, cleanMeta, cleanHook...). Ça pouvait ajouter jusqu'à
+            // 2 minutes à des actions qui n'ont rien à voir avec les plugins/langues.
+            // La synchronisation se fait maintenant via le cron (executeGetLangCron(),
+            // qui appelle désormais les deux en mode forcé), ou explicitement via
+            // getPluginOnDisk(true) / getInstalledLangs(true) si besoin ponctuel.
 
             if (!empty($this->iso_langs) && Validate::isJSON($this->iso_langs)) {
                 $this->iso_langs = $this->context->_tools->jsonDecode($this->iso_langs, true);
@@ -822,14 +840,23 @@ class License extends PhenyxObjectModel {
         }
     }
 
+    /**
+     * CORRIGÉ : `$lic = new License($licence->id);` ne servait qu'à profiter
+     * de l'ancien effet de bord du constructeur (qui appelait aussi
+     * getPluginOnDisk()). Le constructeur ne fait plus ça — donc on synchronise
+     * explicitement les deux ici, en mode forcé, pour garder la même fréquence
+     * de rafraîchissement qu'avant (ce cron reste le seul point d'entrée
+     * automatique pour les deux).
+     */
     public static function executeGetLangCron() {
 
         $licences = new PhenyxCollection('License');
         $licences->where('has_cron', '=', 1);
 
         foreach ($licences as $licence) {
-            $licence->getInstalledLangs();
             $lic = new License($licence->id);
+            $lic->getInstalledLangs(true);
+            $lic->getPluginOnDisk(true);
         }
     }
 
@@ -950,13 +977,39 @@ class License extends PhenyxObjectModel {
         return $this->callApi('cleanEmptyDirectory', [], 60);
     }
 
-    public function getPluginOnDisk() {
+    /**
+     * CORRIGÉ :
+     * - N'est plus appelée depuis le constructeur (voir __construct).
+     * - $force = false (défaut) : ne resollicite pas le site distant si la
+     *   dernière synchro a moins de self::REMOTE_SYNC_TTL secondes.
+     * - Journalise désormais le cas "réponse reçue mais inexploitable"
+     *   (auparavant silencieux : ni erreur curl, ni log, ni mise à jour).
+     */
+    public function getPluginOnDisk($force = false) {
+
+        if (!$force && $this->isRemoteSyncFresh()) {
+
+            if (is_string($this->plugins)) {
+                $this->plugins = Tools::jsonDecode($this->plugins, true);
+            }
+
+            return;
+        }
 
         $plugins = $this->callApi('getPluginOnDisk', [], 60);
 
         if (is_array($plugins)) {
             $this->plugins = $plugins;
             $this->update();
+        } elseif ($plugins !== null) {
+            // $plugins === null => callApi() a déjà loggé (erreur curl/HTTP).
+            // Ici la requête a "réussi" mais la réponse n'est pas exploitable :
+            // c'était le trou noir qui faisait dire "ça ne marche pas, sans log".
+            PhenyxLogger::addLog(
+                'License::getPluginOnDisk — réponse inattendue du site ' . $this->website
+                . ' (id_license ' . $this->id . ') : ' . var_export($plugins, true),
+                2, null, 'License', $this->id
+            );
         }
 
         if (is_string($this->plugins)) {
@@ -964,18 +1017,51 @@ class License extends PhenyxObjectModel {
         }
     }
 
-    public function getInstalledLangs() {
+    /**
+     * CORRIGÉ : même bug, même correctif que getPluginOnDisk() ci-dessus.
+     */
+    public function getInstalledLangs($force = false) {
+
+        if (!$force && $this->isRemoteSyncFresh()) {
+
+            if (is_string($this->iso_langs)) {
+                $this->iso_langs = Tools::jsonDecode($this->iso_langs, true);
+            }
+
+            return;
+        }
 
         $langs = $this->callApi('getInstalledLangs', [], 60);
 
         if (is_array($langs)) {
             $this->iso_langs = $langs;
             $this->update();
+        } elseif ($langs !== null) {
+            PhenyxLogger::addLog(
+                'License::getInstalledLangs — réponse inattendue du site ' . $this->website
+                . ' (id_license ' . $this->id . ') : ' . var_export($langs, true),
+                2, null, 'License', $this->id
+            );
         }
 
         if (is_string($this->iso_langs)) {
             $this->iso_langs = Tools::jsonDecode($this->iso_langs, true);
         }
+    }
+
+    /**
+     * TTL simple basé sur date_upd pour éviter de resolliciter le site distant
+     * à chaque instanciation/cron. date_upd étant aussi modifié par d'autres
+     * opérations, c'est une approximation prudente plutôt qu'un vrai suivi
+     * dédié — largement suffisant pour éviter les appels en rafale.
+     */
+    protected function isRemoteSyncFresh() {
+
+        if (empty($this->date_upd)) {
+            return false;
+        }
+
+        return (time() - strtotime($this->date_upd)) < self::REMOTE_SYNC_TTL;
     }
    
 

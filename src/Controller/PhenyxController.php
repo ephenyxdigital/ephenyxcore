@@ -2225,7 +2225,7 @@ abstract class PhenyxController {
     public function ajaxProcessViewTargetController() {
 
         $this->ajax_display = 'view';
-        $this->ajax_li = '<li id="view' . $this->controller_name . '" data-self="' . $this->link_rewrite . '" data-name="' . $this->page_title . '" data-controller="' . $this->controller_name . '"><a href="#contentview' . $this->controller_name . '"><i class="'.$this->backtab->fa_duatone.'"></i>' . $this->viewName . '</a><button type="button" class="close tabdetail" onClick="closeViewObject(\'' . $this->controller_name . '\');" data-id="view' . $this->controller_name . '"><i class="fa-duotone fa-regular fa-circle-xmark"></i></button></li>';
+        $this->ajax_li = '<li id="view' . $this->controller_name . '" data-type="view"  data-self="' . $this->link_rewrite . '" data-name="' . $this->page_title . '" data-controller="' . $this->controller_name . '"><a href="#contentview' . $this->controller_name . '"><i class="'.$this->backtab->fa_duatone.'"></i>' . $this->viewName . '</a><button type="button" class="close tabdetail" onClick="closeViewObject(\'' . $this->controller_name . '\');" data-id="view' . $this->controller_name . '"><i class="fa-duotone fa-regular fa-circle-xmark"></i></button></li>';
         $this->ajax_content = '<div id="contentview' . $this->controller_name . '" class="panel wpb_text_column  wpb_slideInUp slideInUp wpb_start_animation animated col-lg-12" style="display: content;">' . $this->renderView() . '</div>';
 
         $this->ajaxDisplay();
@@ -2308,7 +2308,7 @@ abstract class PhenyxController {
             'bo_imgdir'       => __EPH_BASE_URI__ . 'content/backoffice/' . $this->bo_theme . '/img/',
         ]);
 
-        $this->ajax_li = '<li id="uper' . $this->controller_name . '" data-self="' . $this->link_rewrite . '" data-name="' . $this->page_title . '" data-controller="' . $this->controller_name . '"><a href="#content' . $this->controller_name . '"><i class="'.$this->backtab->fa_duatone.'"></i>' . $this->publicName . '</a><button type="button" class="close tabdetail" onClick="closeTabObject(\'' . $this->controller_name . '\''.$this->has_composer.');" data-id="uper' . $this->controller_name . '"><i class="fa-duotone fa-regular fa-circle-xmark"></i></button></li>';
+        $this->ajax_li = '<li id="uper' . $this->controller_name . '" data-type="list" data-self="' . $this->link_rewrite . '" data-name="' . $this->page_title . '" data-controller="' . $this->controller_name . '"><a href="#content' . $this->controller_name . '"><i class="'.$this->backtab->fa_duatone.'"></i>' . $this->publicName . '</a><button type="button" class="close tabdetail" onClick="closeTabObject(\'' . $this->controller_name . '\''.$this->has_composer.');" data-id="uper' . $this->controller_name . '"><i class="fa-duotone fa-regular fa-circle-xmark"></i></button></li>';
         $this->ajax_content = '<div id="content' . $this->controller_name . '" class="panel wpb_text_column  wpb_slideInUp slideInUp wpb_start_animation animated col-lg-12" style="display: content;">' . $data->fetch() . '</div>';
 
         $this->ajaxDisplay();
@@ -2863,7 +2863,15 @@ abstract class PhenyxController {
             $_GET['update' . $this->table] = "";
 
             $html = $this->renderForm();
-            $this->ajax_li = '<li id="uperEdit' . $this->controller_name . '" data-controller="' . $this->controller_name . '"><a href="#contentEdit' . $this->controller_name . '"><i class="fa-duotone fa-regular fa-pen-to-square"></i>' . $this->editObject . '</a><button type="button" onClick="closeEditFormObject(\'' . $this->controller_name . '\', ' . $this->composer_editor . ');" class="close tabdetail" data-id="uperEdit' . $this->controller_name . '"><i class="fa-duotone fa-regular fa-circle-xmark"></i></button></li>';
+            // data-name ajouté (retour Jeff 2026-07-23) : nav.js (activate)
+            // lit e.newTab.attr("data-name") pour transmettre le titre de
+            // l'écran à notifyPhenyxAssistantControllerOpened() ; en son
+            // absence "label" vaut undefined côté JS et la fonction
+            // s'arrête immédiatement (garde !label), laissant la popup de
+            // l'assistant afficher le contenu périmé de l'écran précédent
+            // au lieu de se rafraîchir pour l'écran d'édition qui vient de
+            // s'ouvrir.
+            $this->ajax_li = '<li id="uperEdit' . $this->controller_name . '" data-type="edit" data-name="' . $this->editObject . '" data-controller="' . $this->controller_name . '"><a href="#contentEdit' . $this->controller_name . '"><i class="fa-duotone fa-regular fa-pen-to-square"></i>' . $this->editObject . '</a><button type="button" onClick="closeEditFormObject(\'' . $this->controller_name . '\', ' . $this->composer_editor . ');" class="close tabdetail" data-id="uperEdit' . $this->controller_name . '"><i class="fa-duotone fa-regular fa-circle-xmark"></i></button></li>';
             $this->ajax_content = '<div id="contentEdit' . $this->controller_name . '" class="panel wpb_text_column  wpb_slideInUp slideInUp wpb_start_animation animated col-lg-12" style="display; flow-root;">' . $html . '</div>';
 
             $this->ajaxEditDisplay();
@@ -2889,7 +2897,9 @@ abstract class PhenyxController {
         $scriptFooter = $this->context->_hook->exec('displayBackOfficeFooter', []);
         $html = $this->renderForm();
 
-        $this->ajax_li = '<li id="uperAdd' . $this->controller_name . '" data-controller="' . $this->controller_name . '"><a href="#contentAdd' . $this->controller_name . '"><i class="fa-duotone fa-regular fa-square-plus"></i>' . $this->editObject . '</a><button type="button" onClick="closeAddFormObject(\'' . $this->controller_name . '\', ' . $this->composer_editor . ')" class="close tabdetail" data-id="uperAdd' . $this->controller_name . '"><i class="fa-duotone fa-regular fa-circle-xmark"></i></button></li>';
+        // data-name ajouté (retour Jeff 2026-07-23, cf. ajaxProcessEditObject()
+        // ci-dessus pour l'explication complète du bug côté assistant BO).
+        $this->ajax_li = '<li id="uperAdd' . $this->controller_name . '" data-type="add" data-name="' . $this->editObject . '" data-controller="' . $this->controller_name . '"><a href="#contentAdd' . $this->controller_name . '"><i class="fa-duotone fa-regular fa-square-plus"></i>' . $this->editObject . '</a><button type="button" onClick="closeAddFormObject(\'' . $this->controller_name . '\', ' . $this->composer_editor . ')" class="close tabdetail" data-id="uperAdd' . $this->controller_name . '"><i class="fa-duotone fa-regular fa-circle-xmark"></i></button></li>';
         $this->ajax_content = '<div id="contentAdd' . $this->controller_name . '" class="panel wpb_text_column  wpb_slideInUp slideInUp wpb_start_animation animated col-lg-12" style="display; flow-root;">' . $scripHeader . $html . $scriptFooter . '</div>';
 
         $this->ajaxEditDisplay();
@@ -3256,7 +3266,10 @@ abstract class PhenyxController {
 
             $html = $this->renderForm();
 
-            $li = '<li id="uperEdit' . $this->controller_name . '" data-controller="' . $this->controller_name . '"><a href="#contentEdit' . $this->controller_name . '">' . $this->editObject . '</a><button type="button" onClick="closeEditFormObject(\'' . $this->controller_name . '\', ' . $this->composer_editor . ');" class="close tabdetail" data-id="uperEdit' . $this->controller_name . '"><i class="fa-duotone fa-regular fa-circle-xmark"></i></button></li>';
+            // data-type + data-name ajoutés (retour Jeff 2026-07-23, cf.
+            // ajaxProcessEditObject() ci-dessus pour l'explication complète
+            // du bug côté assistant BO) : ce $li en était totalement dépourvu.
+            $li = '<li id="uperEdit' . $this->controller_name . '" data-type="edit" data-name="' . $this->editObject . '" data-controller="' . $this->controller_name . '"><a href="#contentEdit' . $this->controller_name . '">' . $this->editObject . '</a><button type="button" onClick="closeEditFormObject(\'' . $this->controller_name . '\', ' . $this->composer_editor . ');" class="close tabdetail" data-id="uperEdit' . $this->controller_name . '"><i class="fa-duotone fa-regular fa-circle-xmark"></i></button></li>';
 
             $html = '<div id="contentEdit' . $this->controller_name . '" class="panel wpb_text_column  wpb_slideInUp slideInUp wpb_start_animation animated col-lg-12" style="display; flow-root;">' . $html . '</div>';
 
@@ -3434,7 +3447,7 @@ abstract class PhenyxController {
                             } else
 
                             if ($fieldValue === false) {
-                                $this->fields_value[$input['name']] = [];
+                                $this->fields_value[$input['name']] = ((isset($input['multiple']) && $input['multiple']) || (isset($input['type']) && $input['type'] === 'swap')) ? [] : '';
                             } else {
                                 $this->fields_value[$input['name']] = $fieldValue;
                             }
@@ -3490,7 +3503,7 @@ abstract class PhenyxController {
                             } else
 
                             if ($fieldValue === false) {
-                                $this->fields_value[$input['name']] = [];
+                                $this->fields_value[$input['name']] = ((isset($input['multiple']) && $input['multiple']) || (isset($input['type']) && $input['type'] === 'swap')) ? [] : '';
                             } else {
                                 $this->fields_value[$input['name']] = $fieldValue;
                             }
@@ -3551,7 +3564,7 @@ abstract class PhenyxController {
                             } else
 
                             if ($fieldValue === false) {
-                                $this->fields_value[$input['name']] = [];
+                                $this->fields_value[$input['name']] = ((isset($input['multiple']) && $input['multiple']) || (isset($input['type']) && $input['type'] === 'swap')) ? [] : '';
                             } else {
                                 $this->fields_value[$input['name']] = $fieldValue;
                             }
