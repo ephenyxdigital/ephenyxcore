@@ -535,7 +535,13 @@ class PhenyxStats {
             (new DbQuery())
                 ->select('LEFT(`date_add`, 10) as date, SUM(price) as amount')
                 ->from('student_education')
-                ->where('`id_student_education_state` > 3 AND `id_student_education_state` < 8 AND `date_add` BETWEEN "' . pSQL($This->context->company->accounting_period_start) . ' 00:00:00" AND "' . pSQL($this->context->company->accounting_period_end) . ' 23:59:59"')
+                // La borne de début lisait `$This->context` (T majuscule) — corrigé
+                // le 2026-07-26, trouvé en balayant la même coquille repérée dans
+                // PhenyxController::ajaxProcessRefreshTargetController(). La borne de
+                // FIN sur la même ligne était correcte, ce qui rendait l'erreur
+                // invisible à la lecture. getPrevisionnel() ne pouvait donc jamais
+                // s'exécuter : Error sur null en PHP 8, avant même la requête.
+                ->where('`id_student_education_state` > 3 AND `id_student_education_state` < 8 AND `date_add` BETWEEN "' . pSQL($this->context->company->accounting_period_start) . ' 00:00:00" AND "' . pSQL($this->context->company->accounting_period_end) . ' 23:59:59"')
                 ->groupBy('LEFT(`date_add`, 10)')
         );
 

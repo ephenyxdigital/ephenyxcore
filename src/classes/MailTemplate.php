@@ -2,15 +2,12 @@
 
 namespace EphenyxDigital\QuantumCore;
 
-use Tool;
-
 
 /**
  * @since 1.9.1.0
  */
 class MailTemplate extends PhenyxObjectModel {
 
-    public $require_context = false;
     
     // @codingStandardsIgnoreStart
     /**
@@ -69,67 +66,114 @@ class MailTemplate extends PhenyxObjectModel {
 
         return Tools::jsonDecode(Tools::jsonEncode($objectData));
     }
-    
-    public function getTemplatePath() {
-        
-        
-        if (is_null($this->plugin) && file_exists(_EPH_MAIL_DIR_ . $this->template)) {
-            
-            $this->template_path = _EPH_MAIL_DIR_ . $this->template;
-        }  else if (file_exists(_EPH_PLUGIN_DIR_ .$this->plugin.'/views/mails/'. $this->template)) {
-            $this->template_path = _EPH_PLUGIN_DIR_ .$this->plugin.'/views/mails/'. $this->template;
+
+    /**
+     * Resolve the on-disk path of a plugin's mail template, checking the
+     * site-specific override directory (_EPH_SPECIFIC_PLUGIN_DIR_) first,
+     * then falling back to the standard plugin directory (_EPH_PLUGIN_DIR_).
+     * A plugin can exist purely under specific_plugins (no counterpart in
+     * plugins/) or be overridden there while also shipping in plugins/ —
+     * in both cases the specific_plugins copy is the one that should win,
+     * consistent with Translate::loadPluginTranslations() and the
+     * PhenyxAutoload override resolution.
+     *
+     * @return string|null Absolute path if found in either location, else null.
+     */
+    public static function resolvePluginTemplatePath($plugin, $template) {
+
+        if (empty($plugin) || empty($template)) {
+            return null;
         }
-        
+
+        $specificPath = _EPH_SPECIFIC_PLUGIN_DIR_ . $plugin . '/views/mails/' . $template;
+
+        if (file_exists($specificPath)) {
+            return $specificPath;
+        }
+
+        $pluginPath = _EPH_PLUGIN_DIR_ . $plugin . '/views/mails/' . $template;
+
+        if (file_exists($pluginPath)) {
+            return $pluginPath;
+        }
+
+        return null;
     }
-    
-    public static function getStaticTemplatePath($mailtemplate) {
-        
-        
-        if (is_null($mailtemplate['plugin']) && file_exists(_EPH_MAIL_DIR_ . $mailtemplate['template'])) {
-            
-            $template_path = _EPH_MAIL_DIR_ . $mailtemplate['template'];
-        }  else if (file_exists(_EPH_PLUGIN_DIR_ .$mailtemplate['plugin'].'/views/mails/'. $mailtemplate['template'])) {
-            $template_path = _EPH_PLUGIN_DIR_ .$mailtemplate['plugin'].'/views/mails/'. $mailtemplate['template'];
+
+    public function getTemplatePath() {
+
+        if (empty($this->plugin) && file_exists(_EPH_MAIL_DIR_ . $this->template)) {
+
+            $this->template_path = _EPH_MAIL_DIR_ . $this->template;
+        } else {
+            $pluginPath = self::resolvePluginTemplatePath($this->plugin, $this->template);
+
+            if ($pluginPath !== null) {
+                $this->template_path = $pluginPath;
+            }
+
         }
-        
+
+    }
+
+    public static function getStaticTemplatePath($mailtemplate) {
+
+        $template_path = null;
+
+        if (empty($mailtemplate['plugin']) && file_exists(_EPH_MAIL_DIR_ . $mailtemplate['template'])) {
+
+            $template_path = _EPH_MAIL_DIR_ . $mailtemplate['template'];
+        } else {
+            $template_path = self::resolvePluginTemplatePath($mailtemplate['plugin'], $mailtemplate['template']);
+        }
+
         return $template_path;
-        
+
     }
 
     public function getTemplateContent() {
 
         $content = '';
 
-        
-        if (is_null($this->plugin) && file_exists(_EPH_MAIL_DIR_ . $this->template)) {
+        if (empty($this->plugin) && file_exists(_EPH_MAIL_DIR_ . $this->template)) {
             $tpl = str_replace('.tpl', '', $this->template);
 
             $content = file_get_contents(_EPH_MAIL_DIR_ . $this->template);
-            $content = Tool::parseEmailContent($content, $tpl);
-        } else if (file_exists(_EPH_PLUGIN_DIR_ .$this->plugin.'/views/mails/'. $this->template)) {
-            $tpl = str_replace('.tpl', '', $this->template);
-            $content = file_get_contents(_EPH_PLUGIN_DIR_ .$this->plugin.'/views/mails/'. $this->template);
-            $content = Tool::parseEmailContent($content, $tpl);
+            $content = $this->context->_tools->parseEmailContent($content, $tpl);
+        } else {
+            $pluginPath = self::resolvePluginTemplatePath($this->plugin, $this->template);
+
+            if ($pluginPath !== null) {
+                $tpl = str_replace('.tpl', '', $this->template);
+                $content = file_get_contents($pluginPath);
+                $content = $this->context->_tools->parseEmailContent($content, $tpl, $this->plugin);
+            }
+
         }
 
         return $content;
 
     }
-    
+
     public static function getStaticTemplateContent($mailtemplate) {
 
         $_tools = PhenyxTool::getInstance();
         $content = '';
-        
+
         if (empty($mailtemplate['plugin']) && file_exists(_EPH_MAIL_DIR_ . $mailtemplate['template'])) {
             $tpl = str_replace('.tpl', '', $mailtemplate['template']);
 
             $content = file_get_contents(_EPH_MAIL_DIR_ . $mailtemplate['template']);
             $content = $_tools->parseEmailContent($content, $tpl);
-        } else if (file_exists(_EPH_PLUGIN_DIR_ .$mailtemplate['plugin'].'/views/mails/'. $mailtemplate['template'])) {
-            $tpl = str_replace('.tpl', '', $mailtemplate['template']);
-            $content = file_get_contents(_EPH_PLUGIN_DIR_ .$mailtemplate['plugin'].'/views/mails/'. $mailtemplate['template']);
-            $content = $_tools->parseEmailContent($content, $tpl);
+        } else {
+            $pluginPath = self::resolvePluginTemplatePath($mailtemplate['plugin'], $mailtemplate['template']);
+
+            if ($pluginPath !== null) {
+                $tpl = str_replace('.tpl', '', $mailtemplate['template']);
+                $content = file_get_contents($pluginPath);
+                $content = $_tools->parseEmailContent($content, $tpl, $mailtemplate['plugin']);
+            }
+
         }
 
         return $content;

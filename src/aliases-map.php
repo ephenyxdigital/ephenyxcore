@@ -174,6 +174,7 @@ return [
     'PhenyxAssistantRuleProvider' => 'EphenyxDigital\\QuantumCore\\PhenyxAssistantRuleProvider',
     'PhenyxAssistantTopic' => 'EphenyxDigital\\QuantumCore\\PhenyxAssistantTopic',
     'PhenyxAssistantCoreLayer' => 'EphenyxDigital\\QuantumCore\\PhenyxAssistantCoreLayer',
+    'PhenyxAssistantAlias' => 'EphenyxDigital\\QuantumCore\\PhenyxAssistantAlias',
     'PhenyxAutoload' => 'EphenyxDigital\\QuantumCore\\PhenyxAutoload',
     'PhenyxBackup' => 'EphenyxDigital\\QuantumCore\\PhenyxBackup',
     'PhenyxClass' => 'EphenyxDigital\\QuantumCore\\PhenyxClass',

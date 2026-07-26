@@ -6236,12 +6236,12 @@ class PhenyxTool {
         return $holidays;
     }
 
-    public function parseEmailContent($content, $tpl) {
+    public function parseEmailContent($content, $tpl, $plugin=null) {
 
         $translate = [];
-        
-        preg_match_all("~{l s='([^{]*)' mail='true'}~i", $content, $match);
-        preg_match_all("~{l s='([^{]*)' sprintf=([^{]*) mail='true'}~i", $content, $match2);
+
+        preg_match_all("~{l s='([^{]*?)'\s*(?:mod='[^']*')?\s*mail='true'}~i", $content, $match);
+        preg_match_all("~{l s='([^{]*?)'\s*sprintf=([^{]*?)\s*(?:mod='[^']*')?\s*mail='true'}~i", $content, $match2);
         $search = array_merge(
             $match,
             $match2
@@ -6253,7 +6253,7 @@ class PhenyxTool {
 
                 foreach ($strings as $k => $string) {
                     $trans = '<span class="parent-translate" id="' . $tpl . md5($search[1][$k]) . '"><span class="translate-string" contenteditable="true">';
-                    $trans .= $this->context->translations->getMailsTranslation($search[1][$k], $tpl);
+                    $trans .= $this->context->translations->getMailsTranslation($search[1][$k], $tpl, null, $plugin);
                     $trans .= '</span></span>';
                     $translate[$search[0][$k]] = $trans;
                 }
@@ -6264,7 +6264,7 @@ class PhenyxTool {
 
                 foreach ($strings as $k => $string) {
                     $id = $tpl . md5($search[3][$k]);
-                    $translation = $this->context->translations->getMailsTranslation($search[3][$k], $tpl);
+                    $translation = $this->context->translations->getMailsTranslation($search[3][$k], $tpl, null, $plugin);
                     $sprintf = explode(",", str_replace(['[', ']'], '', $search[4][$k]));
 
                     foreach ($sprintf as $index => $value) {

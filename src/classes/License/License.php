@@ -851,7 +851,7 @@ class License extends PhenyxObjectModel {
     public static function executeGetLangCron() {
 
         $licences = new PhenyxCollection('License');
-        $licences->where('has_cron', '=', 1);
+        $licences->where('master_shop', '=', 0);
 
         foreach ($licences as $licence) {
             $lic = new License($licence->id);

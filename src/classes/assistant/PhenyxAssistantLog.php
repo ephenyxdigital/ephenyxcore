@@ -39,6 +39,24 @@ class PhenyxAssistantLog extends PhenyxObjectModel {
 
     public $candidate_count;
 
+    /** @var int|null Topic retenu (cf. PhenyxAssistantAnswer::$idTopic) */
+    public $id_topic;
+
+    /** @var string|null Étage qui a répondu, cf. PhenyxAssistantLayer::STAGE_* */
+    public $match_stage;
+
+    /** @var float|null Score de recoupement réel — à ne pas confondre avec $confidence */
+    public $match_score;
+
+    /** @var int|null Second meilleur topic, pour mesurer l'écart */
+    public $runner_up_topic;
+
+    /** @var float|null */
+    public $runner_up_score;
+
+    /** @var bool Round-trip automatique à l'ouverture d'écran, ou vraie question tapée */
+    public $is_contextual = false;
+
     public $date_add;
 
     public static $definition = [
@@ -56,6 +74,22 @@ class PhenyxAssistantLog extends PhenyxObjectModel {
             'provider'        => ['type' => self::TYPE_STRING, 'size' => 64],
             'confidence'      => ['type' => self::TYPE_FLOAT],
             'candidate_count' => ['type' => self::TYPE_INT],
+
+            /*
+             * Observabilité du matching (ajouté le 2026-07-25). Sans ces
+             * colonnes, diagnostiquer un faux-positif imposait de rejouer le
+             * scoring à la main depuis une capture d'écran — cf. les trois
+             * correctifs des 22, 23 et 24/07/2026.
+             * REQUIERT sql/phenyx_assistant_log_upgrade.sql sur la base
+             * BOUTIQUE de chaque site (pas la base CRM).
+             */
+            'id_topic'        => ['type' => self::TYPE_INT],
+            'match_stage'     => ['type' => self::TYPE_STRING, 'size' => 16],
+            'match_score'     => ['type' => self::TYPE_FLOAT],
+            'runner_up_topic' => ['type' => self::TYPE_INT],
+            'runner_up_score' => ['type' => self::TYPE_FLOAT],
+            'is_contextual'   => ['type' => self::TYPE_BOOL],
+
             'date_add'        => ['type' => self::TYPE_DATE],
         ],
     ];
@@ -85,12 +119,32 @@ class PhenyxAssistantLog extends PhenyxObjectModel {
             $log->provider = $providerName;
             $log->confidence = $answer->confidence;
             $log->candidate_count = (int) $candidateCount;
+
+            // Métadonnées de matching : cf. la convention de
+            // PhenyxAssistantAnswer::$raw. Lues via getMatchMeta() plutôt qu'en
+            // déréférençant $raw, qui reste de type mixte par contrat (une
+            // couche tierce peut y avoir mis autre chose).
+            $log->id_topic = $answer->idTopic ?: $answer->getMatchMeta('idTopic');
+            $log->match_stage = $answer->getMatchMeta('stage');
+            $log->match_score = $answer->getMatchMeta('score');
+            $log->runner_up_topic = $answer->getMatchMeta('runnerUpTopic');
+            $log->runner_up_score = $answer->getMatchMeta('runnerUpScore');
+            $log->is_contextual = !empty($query->extra['isContextual']);
+
             $log->date_add = date('Y-m-d H:i:s');
 
             return (bool) $log->add(false);
         } catch (\Throwable $e) {
+            // Message volontairement explicite sur la cause la plus probable :
+            // le paquet vendor est partagé entre plusieurs sites, donc déployer
+            // ce fichier sans avoir passé l'ALTER TABLE sur la base boutique du
+            // site concerné fait échouer TOUS les inserts de log (silencieusement
+            // du point de vue de l'employé, ce log étant "best effort").
             PhenyxLogger::addLog(
-                sprintf('PhenyxAssistantLog::record a échoué (%s)', $e->getMessage()),
+                sprintf(
+                    'PhenyxAssistantLog::record a échoué (%s) — vérifier que sql/phenyx_assistant_log_upgrade.sql a bien été exécuté sur la base boutique de ce site.',
+                    $e->getMessage()
+                ),
                 2,
                 null,
                 static::class

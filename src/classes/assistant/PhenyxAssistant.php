@@ -42,6 +42,56 @@ class PhenyxAssistant {
     /** Nom du hook interrogé pour enrichir le contexte (grounding) avant génération. */
     const HOOK_CONTEXT = 'actionAssistantContextBuild';
 
+    /**
+     * Hook d'ENRICHISSEMENT d'une réponse déjà retenue.
+     *
+     * Troisième mécanisme, distinct des deux précédents et complémentaire :
+     *
+     *  - HOOK_ANSWER  : le plugin propose une réponse CONCURRENTE, qui entre en
+     *                   arbitrage avec celles des autres couches ;
+     *  - HOOK_CONTEXT : le plugin enrichit le contexte donné au provider
+     *                   (grounding), rien n'est affiché tel quel ;
+     *  - HOOK_ANSWER_AUGMENT : le plugin AJOUTE à une réponse du cœur déjà
+     *                   choisie, sans la remplacer ni la concurrencer.
+     *
+     * Pourquoi il manquait (retour Jeff 2026-07-25) : certains plugins ne
+     * répondent pas « à la place » du cœur, ils MODIFIENT un écran du cœur. Cas
+     * réel, ph_ecommerce sur AdminPreferences :
+     *  - il injecte 11 champs dans l'onglet « Généralités » via le hook
+     *    actionAddPreferenceFields ;
+     *  - et son contrôleur override ajoute un TROISIÈME onglet « Recherche »
+     *    (18 champs AJS_*), là où le cœur n'en déclare que deux.
+     *
+     * Aucun des deux mécanismes existants ne convenait. Faire concurrence au
+     * topic d'accueil du cœur avec HOOK_ANSWER serait absurde (les deux
+     * décrivent le même écran, et l'un des deux perdrait), et l'étage 0 n'admet
+     * de toute façon qu'UN topic lié par écran (clé UNIQUE
+     * (controller_name, source_type)) : le plugin ne peut pas revendiquer le
+     * même écran. Il doit donc compléter, pas remplacer.
+     *
+     * Bénéfice de forme : la conditionnalité est gratuite. Un hook ne se
+     * déclenche que pour les plugins installés et actifs — le cœur n'a aucun
+     * `if (plugin installé)` à écrire, et sa réponse reste exacte sur les sites
+     * sans le plugin.
+     *
+     * CONTRAT — le plugin implémente :
+     *
+     *   public function hookActionAssistantAnswerAugment($params) {
+     *       if ($params['topicCode'] !== 'core.preferences.list') {
+     *           return null;
+     *       }
+     *       return [
+     *           'text'         => '<br /><br />' . $this->l('...'),
+     *           'quickReplies' => [$this->l('How Search Works?')],
+     *       ];
+     *   }
+     *
+     * Il RETOURNE ses ajouts au lieu de muter l'objet réponse : le contrat ne
+     * dépend alors pas de la façon dont Hook::exec() transmet ses paramètres, et
+     * un plugin ne peut pas effacer par accident le texte du cœur.
+     */
+    const HOOK_ANSWER_AUGMENT = 'actionAssistantAnswerAugment';
+
     /** @var self */
     protected static $instance;
 
@@ -56,6 +106,16 @@ class PhenyxAssistant {
 
     /** @var PhenyxAssistantProviderInterface|null */
     protected $provider;
+
+    /**
+     * Meilleur "presque-match" de la requête courante : métadonnées de la couche
+     * qui a le plus approché sans atteindre le seuil (cf.
+     * PhenyxAssistantLayer::getLastMatchMeta()). Transmis au provider dans le
+     * snapshot de contexte pour être journalisé avec le repli.
+     *
+     * @var array|null
+     */
+    protected $nearMissMeta;
 
     protected function __construct() {
 
@@ -168,10 +228,564 @@ class PhenyxAssistant {
             );
         }
 
+        // Enrichissement par les plugins, APRÈS l'arbitrage : on ne complète que
+        // la réponse effectivement retenue, jamais une candidate qui a perdu.
+        $this->augmentAnswer($query, $answer);
+
         // Best effort : un échec de log ne doit jamais empêcher de renvoyer la réponse.
         PhenyxAssistantLog::record($query, $answer, $provider->getName(), count($candidates));
 
         return $answer;
+    }
+
+    /**
+     * Laisse les plugins installés compléter la réponse retenue (cf.
+     * HOOK_ANSWER_AUGMENT).
+     *
+     * Deux garde-fous, parce qu'un plugin tiers ne doit jamais pouvoir dégrader
+     * une réponse du cœur :
+     *  - le texte d'origine n'est jamais remplacé, seulement suffixé ;
+     *  - une exception dans un plugin est journalisée puis ignorée, la réponse
+     *    part quand même.
+     *
+     * @param PhenyxAssistantQuery  $query
+     * @param PhenyxAssistantAnswer $answer Complété sur place
+     * @return void
+     */
+    protected function augmentAnswer(PhenyxAssistantQuery $query, PhenyxAssistantAnswer $answer) {
+
+        // Rien à enrichir sur un repli « je ne sais pas » : aucun topic n'a été
+        // retenu, un plugin n'a donc rien à quoi se raccrocher.
+        if ($answer->isEmpty()) {
+            return;
+        }
+
+        // Filet de sécurité contre un déploiement PARTIEL : $topicCode est posé
+        // par PhenyxAssistantLayer::buildTopicAnswer(). Si ce fichier-là n'est pas
+        // à jour alors que celui-ci l'est, le code manque et l'enrichissement
+        // était silencieusement abandonné — panne invisible et pénible à
+        // diagnostiquer. On le retrouve depuis l'id du topic, qui lui est posé
+        // depuis bien plus longtemps.
+        if (!$answer->topicCode && $answer->idTopic) {
+
+            try {
+                $answer->topicCode = PhenyxAssistantTopic::getCrmDb()->getValue(
+                    (new DbQuery())
+                        ->select('code')
+                        ->from('phenyx_assistant_topic')
+                        ->where('id_phenyx_assistant_topic = ' . (int) $answer->idTopic)
+                );
+                PhenyxLogger::addLog(
+                    'PhenyxAssistant::augmentAnswer : topicCode absent de la réponse, retrouvé depuis idTopic — PhenyxAssistantLayer.php n\'est probablement pas à jour sur ce site.',
+                    2,
+                    null,
+                    static::class
+                );
+            } catch (\Throwable $e) {
+                // Sans code, on ne peut pas enrichir : les plugins l'utilisent
+                // pour reconnaître le topic.
+            }
+
+        }
+
+        if (!$answer->topicCode) {
+            return;
+        }
+
+        $context = Context::getContext();
+
+        if (!isset($context->_hook)) {
+            return;
+        }
+
+        try {
+            $results = $context->_hook->exec(
+                self::HOOK_ANSWER_AUGMENT,
+                [
+                    'query'     => $query,
+                    'answer'    => $answer,
+                    'topicCode' => $answer->topicCode,
+                    'idTopic'   => $answer->idTopic,
+                ],
+                null,
+                true
+            );
+        } catch (\Throwable $e) {
+            PhenyxLogger::addLog(
+                sprintf('PhenyxAssistant: le hook %s a levé une exception (%s)', self::HOOK_ANSWER_AUGMENT, $e->getMessage()),
+                2,
+                null,
+                static::class
+            );
+
+            return;
+        }
+
+        if (!is_array($results)) {
+            return;
+        }
+
+        foreach ($results as $pluginName => $result) {
+
+            if (!is_array($result)) {
+                continue;
+            }
+
+            /*
+             * ⚠️ Normalisation de forme — corrigé le 2026-07-25 après une panne
+             * dont le diagnostic était trompeur.
+             *
+             * La version initiale faisait `foreach ((array) $result as $item)`,
+             * pattern recopié de collectCandidates(). Là-bas il est correct : les
+             * items sont des OBJETS PhenyxAssistantAnswer, et un plugin peut en
+             * renvoyer un seul ou une liste.
+             *
+             * Ici la charge utile est un tableau ASSOCIATIF
+             * ['text' => ..., 'quickReplies' => [...]]. Itérer dessus parcourait
+             * donc ses CHAMPS au lieu de le traiter comme un item :
+             *   - 1re itération : $item = la chaîne de texte -> !is_array -> ignorée ;
+             *   - 2e itération  : $item = le tableau des puces -> is_array OK,
+             *     mais ni clé 'text' ni clé 'quickReplies' dedans -> rien fusionné,
+             *     et pourtant $answer->sourcePlugin renseigné en fin de boucle.
+             *
+             * D'où le symptôme déroutant : le hook renvoyait bien ses 308
+             * caractères (vérifié isolément), sourcePlugin valait 'ph_ecommerce',
+             * et malgré ça ni le texte ni les puces n'arrivaient dans la réponse.
+             *
+             * On détecte donc explicitement la forme au lieu de « rester
+             * tolérant » : la présence d'une des deux clés attendues signe un item
+             * unique, sinon on considère une liste d'items.
+             */
+            /*
+             * ⚠️ La liste des clés reconnues est DÉLIBÉRÉMENT centralisée ici.
+             *
+             * Cette détection a été écrite en ne testant que 'text' et
+             * 'quickReplies', puis 'topicChips' a été ajouté comme troisième
+             * forme de contribution — sans mettre la détection à jour. Résultat,
+             * un plugin ne renvoyant QUE des topicChips (ph_einvoicing sur
+             * core.tour.company) retombait dans la branche « liste d'items », on
+             * reparcourait ses champs, et rien n'était fusionné. Exactement la
+             * même panne que celle corrigée quelques heures plus tôt, au même
+             * endroit, faute d'avoir rendu la détection générique du premier coup.
+             *
+             * Toute nouvelle forme de contribution doit être ajoutée à ce
+             * tableau, et à un seul endroit.
+             */
+            $payloadKeys = ['text', 'quickReplies', 'topicChips'];
+            $isSingleItem = false;
+
+            foreach ($payloadKeys as $payloadKey) {
+
+                if (isset($result[$payloadKey])) {
+                    $isSingleItem = true;
+                    break;
+                }
+
+            }
+
+            $items = $isSingleItem ? [$result] : $result;
+
+            foreach ($items as $item) {
+
+                if (!is_array($item)) {
+                    continue;
+                }
+
+                if (!empty($item['text'])) {
+                    // Concaténation, jamais affectation : le texte du cœur reste
+                    // intact quoi que fasse le plugin.
+                    $answer->text .= (string) $item['text'];
+                }
+
+                if (!empty($item['quickReplies']) && is_array($item['quickReplies'])) {
+                    $answer->quickReplies = array_values(
+                        array_unique(
+                            array_merge((array) $answer->quickReplies, $item['quickReplies'])
+                        )
+                    );
+                }
+
+                /*
+                 * Puces de NAVIGATION contribuées par le plugin (cf.
+                 * PhenyxAssistantAnswer::$topicChips).
+                 *
+                 * C'est le moyen propre pour un plugin de rattacher SES écrans à
+                 * une réponse du cœur : le topic core.tour.company décrit la
+                 * famille « Société » telle que le cœur la connaît et ne peut pas
+                 * mentionner les écrans qu'un plugin y ajoute (constaté le
+                 * 2026-07-25 : la réponse ne disait rien de la facturation
+                 * électronique de ph_einvoicing).
+                 *
+                 * Et comme une puce de navigation porte un id de topic, son
+                 * libellé peut venir du champ `label` — déjà traduit dans les 11
+                 * langues. Le plugin n'a donc AUCUN texte à rédiger pour se
+                 * rendre visible, contrairement à une contribution par 'text'.
+                 *
+                 * Dédoublonnage par idTopic : deux plugins qui pointeraient le
+                 * même topic ne produiraient qu'une puce.
+                 */
+                if (!empty($item['topicChips']) && is_array($item['topicChips'])) {
+                    $existing = [];
+
+                    foreach ((array) $answer->topicChips as $chip) {
+
+                        if (!empty($chip['idTopic'])) {
+                            $existing[(int) $chip['idTopic']] = true;
+                        }
+
+                    }
+
+                    foreach ($item['topicChips'] as $chip) {
+
+                        if (empty($chip['idTopic']) || isset($existing[(int) $chip['idTopic']])) {
+                            continue;
+                        }
+
+                        $existing[(int) $chip['idTopic']] = true;
+                        $answer->topicChips[] = $chip;
+                    }
+
+                }
+
+                // Le plugin peut signaler quel plugin a enrichi, à des fins de
+                // log — sans écraser la source si le cœur en avait déjà une.
+                if (!$answer->sourcePlugin && is_string($pluginName)) {
+                    $answer->sourcePlugin = $pluginName;
+                }
+
+            }
+
+        }
+
+    }
+
+    /**
+     * L'employé a désigné le bon topic parmi plusieurs candidats ambigus
+     * (ÉTAGE 4). On mémorise son choix, puis on lui répond.
+     *
+     * L'ordre importe : on écrit l'alias AVANT de produire la réponse, de sorte
+     * que celle-ci soit servie par l'étage 1 (STAGE_ALIAS) et que le log porte
+     * la trace de ce nouveau chemin. Si l'écriture échoue (base CRM
+     * indisponible), on répond quand même — l'employé attend une réponse, pas un
+     * message d'erreur sur un mécanisme d'apprentissage dont il ignore
+     * l'existence.
+     *
+     * @param string $questionText Question d'origine, telle que tapée
+     * @param int    $idTopic      Topic choisi par l'employé
+     * @param array  $extraContext Cf. PhenyxAssistantQuery::$extra
+     * @return PhenyxAssistantAnswer
+     */
+    public function resolve($questionText, $idTopic, array $extraContext = []) {
+
+        $query = PhenyxAssistantQuery::fromContext($questionText, $extraContext);
+        $idLang = $this->resolveQueryLangId($query);
+
+        PhenyxAssistantAlias::learn(
+            $this->buildQuestionSignature($questionText),
+            $questionText,
+            (int) $idTopic,
+            $idLang,
+            PhenyxAssistantAlias::ORIGIN_EMPLOYEE
+        );
+
+        // Volontairement un ask() complet plutôt qu'une lecture directe du
+        // topic : on veut exactement le même pipeline (filtrage des quick
+        // replies selon l'écran, arbitrage entre couches, journalisation) qu'une
+        // question ordinaire. L'alias fraîchement écrit fait que l'étage 1
+        // répondra du premier coup.
+        return $this->ask($questionText, $extraContext);
+    }
+
+    /**
+     * Réponse d'un topic DÉSIGNÉ PAR SON ID, sans aucun matching.
+     *
+     * Sert aux puces de PhenyxAssistantAnswer::$topicChips — typiquement le tour
+     * dérivé du menu, dont les libellés sont des noms de familles
+     * (« Nos produits ») qui n'ont aucune raison de recouper les mots-clés du
+     * topic visé. Renvoyer ce libellé comme une question l'aurait fait repasser
+     * par le scoring, avec tous les risques de collision qu'on a passé la journée
+     * à éliminer.
+     *
+     * Volontairement SANS écriture d'alias, contrairement à resolve() : cliquer
+     * une puce de navigation n'est pas trancher une ambiguïté, il n'y a rien à
+     * apprendre.
+     *
+     * @param int   $idTopic
+     * @param array $extraContext Cf. PhenyxAssistantQuery::$extra
+     * @return PhenyxAssistantAnswer
+     */
+    public function answerForTopic($idTopic, array $extraContext = []) {
+
+        $query = PhenyxAssistantQuery::fromContext('', $extraContext);
+        $idLang = $this->resolveQueryLangId($query);
+        $row = PhenyxAssistantTopic::getRowById((int) $idTopic, $idLang);
+
+        if (!$row || empty($row['answer'])) {
+            return PhenyxAssistantAnswer::text(
+                'Ce sujet n\'est plus disponible.',
+                null,
+                0.0
+            );
+        }
+
+        /*
+         * DROITS — un id de topic arrive ici depuis le NAVIGATEUR (clic sur une
+         * puce). Les puces sont déjà filtrées à la construction, mais rien
+         * n'empêche de rejouer la requête avec un autre id : c'est une entrée
+         * utilisateur, elle se vérifie côté serveur.
+         *
+         * Même règle que dans PhenyxAssistantLayer::matchBestTopic() — un topic
+         * sans liage d'écran reste accessible à tous.
+         */
+        if (!PhenyxAssistantTopic::isTopicAllowed((int) $row['id_phenyx_assistant_topic'])) {
+            $restricted = PhenyxAssistantTopic::getRowByCode(
+                PhenyxAssistantLayer::RESTRICTED_TOPIC_CODE,
+                $idLang
+            );
+
+            return PhenyxAssistantAnswer::text(
+                ($restricted && !empty($restricted['answer']))
+                ? (string) $restricted['answer']
+                : 'Ce sujet ne fait pas partie de ton périmètre.',
+                null,
+                0.9
+            );
+        }
+
+        $answer = PhenyxAssistantAnswer::text((string) $row['answer'], null, (float) $row['confidence']);
+        $answer->idTopic = (int) $row['id_phenyx_assistant_topic'];
+        $answer->topicCode = (string) $row['code'];
+        $answer->suggestedAction = !empty($row['suggested_action']) ? json_decode($row['suggested_action'], true) : null;
+        $answer->quickReplies = !empty($row['quick_replies']) ? (array) json_decode($row['quick_replies'], true) : [];
+
+        /*
+         * Faute d'action déclarée, on propose d'OUVRIR l'écran que ce topic
+         * documente — déduit du liage, cf.
+         * PhenyxAssistantTopic::getBoundControllerForTopic().
+         *
+         * Retour Jeff 2026-07-25 : les puces de la famille « Société » répondaient
+         * correctement mais laissaient l'employé chercher l'écran lui-même. Côté
+         * navigateur, 'openTargetController' passe par simulateBackTabNavigation()
+         * qui déroule visuellement le menu jusqu'à l'entrée avant de cliquer — il
+         * MONTRE le chemin au lieu de téléporter, ce qui est exactement ce qu'on
+         * veut d'un assistant.
+         *
+         * Jamais d'écrasement d'une action existante : un topic qui déclare
+         * openScreenTab ou highlightElement garde la sienne.
+         */
+        if (empty($answer->suggestedAction)) {
+            $screenAction = PhenyxAssistantTopic::getScreenActionForTopic(
+                (int) $row['id_phenyx_assistant_topic'],
+                $idLang
+            );
+
+            if ($screenAction) {
+                $answer->suggestedAction = $screenAction;
+            }
+
+        }
+        $answer->raw = [
+            // Résolution exacte, au même titre qu'un alias : aucune approximation
+            // n'est intervenue. Le log doit le refléter.
+            'stage'         => PhenyxAssistantLayer::STAGE_ALIAS,
+            'score'         => null,
+            'idTopic'       => (int) $row['id_phenyx_assistant_topic'],
+            'runnerUpTopic' => null,
+            'runnerUpScore' => null,
+        ];
+
+        /*
+         * FAMILLE DE MENU : puces dérivées des onglets enfants.
+         *
+         * Pendant de ce que fait PhenyxAssistantLayer::buildTopicAnswer() sur le
+         * chemin du matching — ici c'est le chemin du CLIC sur une puce, qui ne
+         * passe pas par la couche. Les deux doivent se comporter pareil, sinon le
+         * tour montrerait des écrans différents selon qu'on y arrive en tapant une
+         * question ou en cliquant : c'est précisément le genre d'incohérence qui
+         * fait douter l'employé de l'assistant.
+         *
+         * ⚠️ L'ORDRE COMPTE. Cette dérivation doit précéder augmentAnswer(), qui
+         * dédoublonne les puces contribuées par les plugins contre celles déjà
+         * présentes (cf. le bloc 'topicChips' dans augmentAnswer()). Placée après,
+         * elle ferait apparaître deux fois les écrans que ph_einvoicing et
+         * ph_ecommerce contribuent explicitement au tour de « Société » — ils sont
+         * aussi des enfants d'AdminParentCompany, donc dérivés d'office.
+         */
+        $parent = PhenyxAssistantTopic::getMenuBindingForTopic((int) $row['id_phenyx_assistant_topic']);
+
+        if ($parent) {
+            $children = PhenyxAssistantTopic::getMenuChildrenTopics($parent, $idLang);
+
+            if ($children) {
+                $answer->topicChips = PhenyxAssistantTopic::mergeTopicChips(
+                    $children,
+                    (array) $answer->topicChips
+                );
+                $answer->quickReplies = [];
+
+                /*
+                 * ⚠️ Une famille n'expose AUCUN bouton d'ouverture (règle du
+                 * 2026-07-26). Pendant exact du même traitement dans
+                 * PhenyxAssistantLayer::buildTopicAnswer() — les deux chemins,
+                 * question tapée et clic sur une puce, doivent donner la même chose.
+                 *
+                 * La mise à null est ici indispensable et pas seulement défensive :
+                 * le bloc getScreenActionForTopic() plus haut a pu poser une action,
+                 * et surtout core.tour.company déclarait trois actions rédigées
+                 * jusqu'à cette date. Un site dont le wiki n'a pas encore été
+                 * re-seedé continuerait sinon d'afficher ses boutons.
+                 */
+                $answer->suggestedAction = null;
+            }
+
+        }
+
+        // Les plugins peuvent enrichir cette réponse comme n'importe quelle autre.
+        $this->augmentAnswer($query, $answer);
+
+        // Journalisé avec le libellé du topic comme « question » : sans texte
+        // saisi, c'est la seule trace lisible de ce que l'employé a demandé.
+        $query->text = !empty($row['label']) ? (string) $row['label'] : (string) $row['code'];
+        PhenyxAssistantLog::record($query, $answer, 'topic', 1);
+
+        return $answer;
+    }
+
+    /**
+     * Réponse pour un écran PRÉSENT dans le menu mais pas encore documenté.
+     *
+     * ⚠️ Contrepartie du renversement du 2026-07-26 (cf.
+     * PhenyxAssistantTopic::getMenuFamilyTopics()) : puisque toute entrée visible
+     * du menu produit désormais une puce, il faut savoir répondre quand on clique
+     * sur l'une de celles qui n'ont pas de topic. Une puce muette serait pire que
+     * l'absence de puce.
+     *
+     * La réponse assume l'ignorance et reste utile : elle NOMME l'écran tel qu'il
+     * s'appelle dans le menu, et propose quand même de l'ouvrir. L'assistant ne
+     * sait pas l'expliquer, mais il sait y conduire — ce qui est déjà l'essentiel
+     * de ce qu'un employé perdu cherche.
+     *
+     * @param string $controller Nom de classe, tel que porté par la puce
+     * @param array  $extraContext
+     * @return PhenyxAssistantAnswer
+     */
+    public function answerForController($controller, array $extraContext = []) {
+
+        $query = PhenyxAssistantQuery::fromContext('', $extraContext);
+        $idLang = $this->resolveQueryLangId($query);
+        $controller = (string) $controller;
+
+        /*
+         * Vérification de droits, pour la même raison que dans answerForTopic() :
+         * le nom de contrôleur vient du navigateur. Sans ce contrôle, il suffirait
+         * de rejouer la requête avec un autre nom pour apprendre l'existence d'un
+         * écran interdit et se le faire ouvrir.
+         */
+        if (!PhenyxAssistantTopic::isControllerVisible($controller)) {
+            $restricted = PhenyxAssistantTopic::getRowByCode(
+                PhenyxAssistantLayer::RESTRICTED_TOPIC_CODE,
+                $idLang
+            );
+
+            return PhenyxAssistantAnswer::text(
+                ($restricted && !empty($restricted['answer'])) ? (string) $restricted['answer'] : '',
+                null,
+                0.9
+            );
+        }
+
+        // Libellé du menu, pas nom de classe : « Gestion des Partenaires », pas
+        // « AdminParentPart ». Même source que les puces (back_tab_lang).
+        $label = $controller;
+        $idTab = (int) BackTab::getIdFromClassName($controller);
+
+        if ($idTab) {
+            $tab = BackTab::getTab($idLang, $idTab);
+
+            if (is_array($tab) && !empty($tab['name'])) {
+                $label = (string) $tab['name'];
+            }
+
+        }
+
+        $row = PhenyxAssistantTopic::getRowByCode(PhenyxAssistantLayer::UNDOCUMENTED_TOPIC_CODE, $idLang);
+        $text = ($row && !empty($row['answer'])) ? (string) $row['answer'] : '';
+        // Jeton nommé, même raison que FAMILY_COUNT_TOKEN : pas de sprintf sur du
+        // texte de wiki.
+        $text = str_replace('{screen}', '<strong>' . $label . '</strong>', $text);
+
+        $answer = PhenyxAssistantAnswer::text($text, null, 0.7);
+
+        /*
+         * Un PARENT de menu n'a pas d'écran à ouvrir : proposer « Ouvrir Gestion
+         * des Partenaires » sur une famille mènerait à un clic sans effet. On ne
+         * pose l'action que si le contrôleur a réellement un écran — heuristique :
+         * il n'est pas dans la liste des parents connus du menu.
+         */
+        $action = PhenyxAssistantTopic::buildOpenActionForController($controller, $idLang);
+
+        if ($action) {
+            $answer->suggestedAction = $action;
+        }
+
+        $query->text = $label;
+        PhenyxAssistantLog::record($query, $answer, 'screen', 1);
+
+        return $answer;
+    }
+
+    /**
+     * Signature d'une question, pour l'écriture d'un alias depuis
+     * l'orchestrateur.
+     *
+     * questionSignature() est `protected` sur PhenyxAssistantLayer (c'est un
+     * détail d'implémentation du matching, pas une API publique) : on passe donc
+     * par la couche core, qui est toujours enregistrée, plutôt que de dupliquer
+     * l'algorithme ici — deux implémentations de la normalisation qui
+     * divergeraient produiraient des alias jamais retrouvés, le pire des bugs
+     * possibles sur ce mécanisme.
+     *
+     * @param string $questionText
+     * @return string
+     */
+    protected function buildQuestionSignature($questionText) {
+
+        foreach ($this->layers as $layer) {
+
+            if ($layer instanceof PhenyxAssistantCoreLayer) {
+                return $layer->publicQuestionSignature($questionText);
+            }
+
+        }
+
+        // Aucune couche core (cas théorique : registerCoreLayers() l'enregistre
+        // toujours) — on prend la première disponible.
+        foreach ($this->layers as $layer) {
+            return $layer->publicQuestionSignature($questionText);
+        }
+
+        return '';
+    }
+
+    /**
+     * Résout l'id_lang d'une query, avec le même repli défensif que
+     * PhenyxAssistantLayer::resolveLangId().
+     *
+     * @param PhenyxAssistantQuery $query
+     * @return int
+     */
+    protected function resolveQueryLangId(PhenyxAssistantQuery $query) {
+
+        if ($query->isoCode && Validate::isLanguageIsoCode($query->isoCode)) {
+            $idLang = (int) Language::getIdByIso($query->isoCode);
+
+            if ($idLang) {
+                return $idLang;
+            }
+
+        }
+
+        return (int) Configuration::getInstance()->get('EPH_LANG_DEFAULT');
     }
 
     /**
@@ -187,6 +801,7 @@ class PhenyxAssistant {
     protected function collectCandidates(PhenyxAssistantQuery $query) {
 
         $candidates = [];
+        $this->nearMissMeta = null;
 
         foreach ($this->layers as $layer) {
 
@@ -204,8 +819,16 @@ class PhenyxAssistant {
 
             if ($result instanceof PhenyxAssistantAnswer && !$result->isEmpty()) {
                 $candidates[] = $result;
+                continue;
             }
 
+            // La couche n'a rien répondu : on retient quand même de combien elle
+            // a manqué le seuil. Sans ça, une question sans réponse
+            // n'apparaîtrait dans le log qu'avec un score vide, alors que
+            // "0.6 sur deux mots génériques" et "aucun mot-clé commun" appellent
+            // deux corrections très différentes (revoir un seuil vs écrire un
+            // topic manquant).
+            $this->rememberNearMiss($layer->getLastMatchMeta());
         }
 
         $context = Context::getContext();
@@ -243,6 +866,26 @@ class PhenyxAssistant {
     }
 
     /**
+     * Retient le meilleur presque-match rencontré sur la requête courante.
+     * "Meilleur" = plus haut 'score' : avec plusieurs couches qui échouent
+     * toutes, celle qui a le plus approché est la plus instructive.
+     *
+     * @param array|null $meta Cf. PhenyxAssistantLayer::getLastMatchMeta()
+     * @return void
+     */
+    protected function rememberNearMiss($meta) {
+
+        if (!is_array($meta) || !isset($meta['score'])) {
+            return;
+        }
+
+        if ($this->nearMissMeta === null || (float) $meta['score'] > (float) $this->nearMissMeta['score']) {
+            $this->nearMissMeta = $meta;
+        }
+
+    }
+
+    /**
      * Construit l'instantané de contexte BO donné au provider (grounding).
      * Reste une structure de données simple (array), pas un objet dédié, pour
      * rester facile à sérialiser tel quel dans un futur prompt LLM.
@@ -265,6 +908,11 @@ class PhenyxAssistant {
             'backTab' => $this->getBackTabInfo($query->controllerName),
             'entity'  => null,
             'layers'  => $this->describeLayers(),
+            // Renseigné uniquement si collectCandidates() a déjà tourné pour
+            // cette requête (c'est l'ordre dans ask()) — permet au provider de
+            // journaliser de combien le meilleur candidat a manqué le seuil
+            // quand il doit produire un repli.
+            'nearMissMeta' => $this->nearMissMeta,
         ];
 
         if ($query->entityClass && class_exists($query->entityClass)) {

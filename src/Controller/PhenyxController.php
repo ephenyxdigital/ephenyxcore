@@ -2193,7 +2193,15 @@ abstract class PhenyxController {
             ();
             $data->assign([
                 'manageHeaderFields' => $this->manageHeaderFields,
-                'customHeaderFields' => $this->manageFieldsVisibility($This->configurationField),
+                // Était `$This->configurationField` — coquille corrigée le
+                // 2026-07-26. $This n'existe pas : Error sur null en PHP 8, pour
+                // TOUT contrôleur respectant la convention get{ClassName}Fields()
+                // qui passe par cette action (AdminImport, AdminMailTemplates,
+                // AdminBankImport…). Les trois autres chemins qui appliquent la
+                // même convention — openTargetController(),
+                // ajaxProcessOpenTargetController(), ajaxProcessRefreshContent() —
+                // utilisent une variable locale et n'étaient pas touchés.
+                'customHeaderFields' => $this->manageFieldsVisibility($this->configurationField),
             ]);
 
         }
@@ -2308,7 +2316,15 @@ abstract class PhenyxController {
             'bo_imgdir'       => __EPH_BASE_URI__ . 'content/backoffice/' . $this->bo_theme . '/img/',
         ]);
 
-        $this->ajax_li = '<li id="uper' . $this->controller_name . '" data-type="list" data-self="' . $this->link_rewrite . '" data-name="' . $this->page_title . '" data-controller="' . $this->controller_name . '"><a href="#content' . $this->controller_name . '"><i class="'.$this->backtab->fa_duatone.'"></i>' . $this->publicName . '</a><button type="button" class="close tabdetail" onClick="closeTabObject(\'' . $this->controller_name . '\''.$this->has_composer.');" data-id="uper' . $this->controller_name . '"><i class="fa-duotone fa-regular fa-circle-xmark"></i></button></li>';
+        // Repli sur publicName si page_title est vide (Meta::getTitle() ne
+        // trouve pas de ligne meta/meta_lang pour ce php_self, ex. table meta
+        // incomplète sur certains sites en marque blanche) -- retour Jeff
+        // 2026-07-24 : sans repli, data-name="" cassait silencieusement le
+        // rafraichissement contextuel de l'assistant BO (cf.
+        // notifyPhenyxAssistantControllerOpened() dans ephenyx.js, qui exige
+        // un label non vide) sans aucune erreur JS visible.
+        $tabDataName = $this->page_title ? $this->page_title : $this->publicName;
+        $this->ajax_li = '<li id="uper' . $this->controller_name . '" data-type="list" data-self="' . $this->link_rewrite . '" data-name="' . $tabDataName . '" data-controller="' . $this->controller_name . '"><a href="#content' . $this->controller_name . '"><i class="'.$this->backtab->fa_duatone.'"></i>' . $this->publicName . '</a><button type="button" class="close tabdetail" onClick="closeTabObject(\'' . $this->controller_name . '\''.$this->has_composer.');" data-id="uper' . $this->controller_name . '"><i class="fa-duotone fa-regular fa-circle-xmark"></i></button></li>';
         $this->ajax_content = '<div id="content' . $this->controller_name . '" class="panel wpb_text_column  wpb_slideInUp slideInUp wpb_start_animation animated col-lg-12" style="display: content;">' . $data->fetch() . '</div>';
 
         $this->ajaxDisplay();

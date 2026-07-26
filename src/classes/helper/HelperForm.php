@@ -160,6 +160,22 @@ class HelperForm extends Helper {
                         unset($this->fields_form[$fieldsetKey]['form']['input'][$key]);
                     }
 
+                    /*
+                     * Pseudo-input de SECTION : séparateur visuel groupant les
+                     * champs qui le suivent sous un même intitulé (rendu par
+                     * helpers/form/form.tpl, styles .eph-options-section dans
+                     * ephenyx.css). Pendant exact du 'type' => 'section' de
+                     * HelperOptions.
+                     *
+                     * Ce n'est pas un champ de formulaire : il n'a ni `name` à
+                     * poster, ni valeur, ni validation. Le `continue` évite que la
+                     * machinerie ci-dessous (résolution de nom, suffixe '[]' des
+                     * multiples, chargement d'éditeur…) ne s'applique à lui.
+                     */
+                    if (isset($params['type']) && $params['type'] === 'section') {
+                        continue;
+                    }
+
                     switch ($params['type']) {
                     case 'select':
                         $fieldName = (string) $params['name'];

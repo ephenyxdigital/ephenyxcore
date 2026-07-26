@@ -2247,6 +2247,160 @@ abstract class Plugin {
         return $this->local_path;
     }
 
+    /**
+     * Chemin conventionnel du fichier de topics de l'assistant BO d'un plugin.
+     *
+     * Convention plutôt que configuration : un plugin qui dépose un fichier à cet
+     * emplacement est automatiquement pris en compte, sans rien déclarer.
+     */
+    const ASSISTANT_TOPICS_FILE = 'assistant/topics.php';
+
+    /**
+     * Chemin conventionnel du fichier de liages « écran/menu → topic » d'un
+     * plugin. Même principe que ASSISTANT_TOPICS_FILE : présence du fichier =
+     * prise en compte, rien à déclarer.
+     */
+    const ASSISTANT_SCREENS_FILE = 'assistant/screens.php';
+
+    /**
+     * Écrit les liages d'assistant de CE plugin, s'il en fournit.
+     *
+     * À appeler depuis install() (et reset()) JUSTE APRÈS
+     * seedAssistantTopics() : les liages désignent les topics par leur `code`,
+     * ils doivent donc exister d'abord.
+     *
+     * Le fichier `assistant/screens.php` doit RETOURNER un tableau d'entrées au
+     * format de PhenyxAssistantTopic::seedScreenBindings() :
+     *
+     *   return [
+     *       ['topic' => 'ph_ecommerce.tour.product',
+     *        'controller' => 'AdminParentProduct',
+     *        'source_type' => 'menu'],
+     *       ['topic' => 'ph_ecommerce.products.list',
+     *        'controller' => 'AdminProducts',
+     *        'source_type' => 'list'],
+     *   ];
+     *
+     * Deux usages pour un seul mécanisme : le topic d'accueil d'un écran (ÉTAGE 0,
+     * sans scoring) et la famille de menu qu'un topic documente (tour dérivé du
+     * menu réel). C'est ce qui permet à un plugin qui remanie le menu — comme
+     * ph_ecommerce — d'apparaître dans le tour sans que le cœur connaisse ses
+     * familles.
+     *
+     * ⚠️ Renvoie TOUJOURS true, pour la même raison que seedAssistantTopics() :
+     * un liage non écrit dégrade l'aide, il ne doit pas faire échouer
+     * l'installation d'un plugin.
+     *
+     * @return bool
+     */
+    public function seedAssistantScreens() {
+
+        $file = $this->getLocalPath() . static::ASSISTANT_SCREENS_FILE;
+
+        if (!file_exists($file)) {
+			PhenyxLogger::addLog(
+                sprintf('%s::seedAssistantScreens a échoué  — no file.', $this->name),
+                2,
+                null,
+                $this->name
+            );
+            return true;
+        }
+
+        try {
+            $bindings = include $file;
+
+            if (!is_array($bindings) || !$bindings) {
+                return true;
+            }
+
+            PhenyxAssistantTopic::seedScreenBindings($bindings, $this->name);
+        } catch (\Throwable $e) {
+            PhenyxLogger::addLog(
+                sprintf('%s::seedAssistantScreens a échoué (%s) — relançable, l\'installation continue.', $this->name, $e->getMessage()),
+                2,
+                null,
+                $this->name
+            );
+        }
+
+        return true;
+    }
+
+    /**
+     * Écrit en base les topics d'assistant BO de CE plugin, s'il en fournit.
+     *
+     * À appeler depuis install() et reset() du plugin. Le fichier attendu est
+     * `assistant/topics.php` à la racine du plugin ; il doit RETOURNER un tableau
+     * de définitions au format de PhenyxAssistantTopic::seedTopics() (un topic par
+     * entrée, avec `code`, `translations` et éventuellement `entity_class`,
+     * `confidence`, `suggested_action`).
+     *
+     * Implémentée ici et non dans chaque plugin (retour Jeff 2026-07-25) : la
+     * découverte du fichier, la tolérance à son absence et le rattachement à
+     * `source_plugin` sont strictement identiques d'un plugin à l'autre. Un plugin
+     * n'a donc plus qu'à fournir du CONTENU.
+     *
+     * Idempotent par `code` : réexécutable à volonté, et réactive au passage des
+     * topics qu'un uninstall() précédent aurait désactivés.
+     *
+     * ⚠️ Renvoie TOUJOURS true, volontairement. Ces topics vivent dans la base CRM
+     * centralisée « phenyx-traduction », dont l'accessibilité ne conditionne en
+     * rien le fonctionnement de la boutique. Faire échouer l'installation d'un
+     * plugin complet parce qu'un texte d'aide n'a pas pu être écrit serait
+     * disproportionné — d'autant que l'opération est relançable. Les échecs
+     * partent dans PhenyxLogger.
+     *
+     * @return bool
+     */
+    public function seedAssistantTopics() {
+
+        $file = $this->getLocalPath() . static::ASSISTANT_TOPICS_FILE;
+
+        if (!file_exists($file)) {
+			PhenyxLogger::addLog(
+                sprintf('%s::seedAssistantTopics a échoué  — no file.', $this->name),
+                2,
+                null,
+                $this->name
+            );
+            return true;
+        }
+
+        try {
+            $definitions = include $file;
+
+            if (!is_array($definitions) || !$definitions) {
+                return true;
+            }
+
+            $report = PhenyxAssistantTopic::seedTopics($definitions, $this->name);
+
+            PhenyxLogger::addLog(
+                sprintf(
+                    '%s: topics assistant seedés (%d créés, %d mis à jour, %d en échec%s)',
+                    $this->name,
+                    $report['created'],
+                    $report['updated'],
+                    $report['failed'],
+                    $report['untranslated'] ? ', langues non traduites : ' . implode(', ', $report['untranslated']) : ''
+                ),
+                1,
+                null,
+                $this->name
+            );
+        } catch (\Throwable $e) {
+            PhenyxLogger::addLog(
+                sprintf('%s::seedAssistantTopics a échoué (%s) — relançable, l\'installation continue.', $this->name, $e->getMessage()),
+                2,
+                null,
+                $this->name
+            );
+        }
+
+        return true;
+    }
+
     public function addOverride($classname) {
 
         $origPath = $path = PhenyxAutoload::getInstance()->getClassPath($classname . 'Core');
@@ -2735,6 +2889,22 @@ abstract class Plugin {
         foreach ($metas as $meta) {
             $meta->delete();
         }
+
+        /*
+         * Topics d'assistant BO de ce plugin : DÉSACTIVÉS, jamais supprimés.
+         *
+         * Les alias appris (eph_phenyx_assistant_alias) pointent vers ces topics ;
+         * les supprimer laisserait des alias orphelins et perdrait définitivement
+         * l'apprentissage accumulé, qu'une réinstallation doit retrouver. Un topic
+         * inactif est déjà ignoré partout en lecture (`t.active = 1`).
+         *
+         * Traité ici, dans la classe de base, plutôt que dans le uninstall() de
+         * chaque plugin (retour Jeff 2026-07-25) : c'est le pendant symétrique de
+         * seedAssistantTopics(), et un plugin qui oublierait de le faire
+         * laisserait des réponses d'aide vivantes pour des fonctionnalités
+         * désinstallées. Sans effet pour les plugins qui n'ont pas de topics.
+         */
+        PhenyxAssistantTopic::deactivateForPlugin($this->name);
 
         $this->disable(true);
 

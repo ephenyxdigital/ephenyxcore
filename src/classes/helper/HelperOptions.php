@@ -82,7 +82,35 @@ class HelperOptions extends Helper {
             }
 
             foreach ($categoryData['fields'] as $key => &$field) {
-                
+
+                /*
+                 * Pseudo-champ de SECTION : un simple séparateur visuel groupant
+                 * les champs qui le suivent sous un même intitulé (cf.
+                 * options_row.tpl et .eph-options-section dans ephenyx.css).
+                 * Ce n'est pas une variable de configuration : il n'a ni valeur à
+                 * lire, ni validation, ni cast.
+                 *
+                 * Le `continue` est indispensable et pas seulement une
+                 * optimisation : sans lui, getOptionValue() irait chercher en base
+                 * une clé de configuration qui n'existe pas, et le template
+                 * lirait des index absents.
+                 *
+                 * Déclaration côté contrôleur :
+                 *   'section_security' => [
+                 *       'type'      => 'section',
+                 *       'title'     => $this->la('Security'),
+                 *       'desc'      => $this->la('HTTPS and form protection'),
+                 *       'icon'      => 'fa-duotone fa-regular fa-shield-halved',
+                 *       'collapsed' => false, // replié au chargement si true
+                 *   ],
+                 *
+                 * Rétrocompatible : un écran qui ne déclare aucune section
+                 * s'affiche exactement comme avant.
+                 */
+                if (isset($field['type']) && $field['type'] === 'section') {
+                    continue;
+                }
+
                 // Set field value unless explicitly denied
 
                 if (!isset($field['auto_value']) || $field['auto_value']) {
