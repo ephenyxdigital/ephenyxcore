@@ -234,6 +234,22 @@ class EntrepriseApi extends ExternalApi {
 
         $etat = isset($etab['etat_administratif']) ? (string) $etab['etat_administratif'] : '';
 
+        // La voie, recomposee a partir de ses morceaux. Le champ « adresse » de
+        // l'API contient DEJA le code postal et la commune : le recopier tel
+        // quel dans un formulaire les ferait apparaitre en double.
+        $voie = trim(preg_replace('/\s+/', ' ', implode(' ', array_filter([
+            isset($etab['numero_voie']) ? (string) $etab['numero_voie'] : '',
+            isset($etab['indice_repetition']) ? (string) $etab['indice_repetition'] : '',
+            isset($etab['type_voie']) ? (string) $etab['type_voie'] : '',
+            isset($etab['libelle_voie']) ? (string) $etab['libelle_voie'] : '',
+        ]))));
+
+        // L'API rend « 64.20Z ». Validate::isApe() attend /^[0-9]{3,4}[a-zA-Z]$/,
+        // sans point : recopie telle quelle, la valeur serait refusee a
+        // l'enregistrement, sur un champ que le client n'a pas saisi lui-meme.
+        $activite = isset($etab['activite_principale']) ? (string) $etab['activite_principale'] : '';
+        $ape = preg_replace('/[^0-9A-Za-z]/', '', $activite);
+
         return [
             'siret'          => isset($etab['siret']) ? (string) $etab['siret'] : '',
             'siren'          => isset($entreprise['siren']) ? (string) $entreprise['siren'] : '',
@@ -241,7 +257,11 @@ class EntrepriseApi extends ExternalApi {
             ? (string) $entreprise['nom_raison_sociale']
             : (isset($entreprise['nom_complet']) ? (string) $entreprise['nom_complet'] : ''),
             'enseigne'       => isset($etab['nom_commercial']) ? (string) $etab['nom_commercial'] : '',
+            // « adresse » = la forme complete de l'API, code postal et commune
+            // compris. « voie » = la rue seule, celle qui va dans un formulaire.
             'adresse'        => isset($etab['adresse']) ? (string) $etab['adresse'] : '',
+            'voie'           => $voie,
+            'complement'     => isset($etab['complement_adresse']) ? (string) $etab['complement_adresse'] : '',
             'code_postal'    => isset($etab['code_postal']) ? (string) $etab['code_postal'] : '',
             'commune'        => isset($etab['libelle_commune']) ? (string) $etab['libelle_commune'] : '',
             'siege'          => !empty($etab['est_siege']),
@@ -250,7 +270,11 @@ class EntrepriseApi extends ExternalApi {
             // des tarifs professionnels sur un etat qu'on ne sait pas lire.
             'actif'          => ($etat === 'A'),
             'etat'           => $etat,
-            'activite'       => isset($etab['activite_principale']) ? (string) $etab['activite_principale'] : '',
+            // « activite » = la forme officielle, avec le point. « ape » = la
+            // meme, epuree, directement utilisable dans un champ valide par
+            // Validate::isApe().
+            'activite'       => $activite,
+            'ape'            => $ape,
             'date_creation'  => isset($etab['date_creation']) ? (string) $etab['date_creation'] : '',
             'tva'            => $tva,
             'date_reponse'   => date('Y-m-d H:i:s'),

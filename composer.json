@@ -59,8 +59,7 @@
                 "src/classes/revslider/",
                 "src/classes/topmenu/",
                 "src/classes/tree/"
-            ],
-            "ReCaptcha\\": "src/classes/ReCaptcha/"
+            ]
         },
         "files": [
             "digitalcore.composer.php",
