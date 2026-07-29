@@ -24,7 +24,7 @@
         "rosell-dk/dom-util-for-webp": "^0.7",
         "ephenyxdigital/einvoice": "^2",
         "ephenyxdigital/devicedetect": "^1",
-		"mongodb/mongodb": "^2"
+        "mongodb/mongodb": "^2"
     },
     "autoload": {
         "psr-4": {
@@ -42,6 +42,7 @@
                 "src/Core/Foundation/IoC/",
                 "src/classes/",
                 "src/classes/assistant/",
+                "src/classes/api/",
                 "src/classes/License/",
                 "src/classes/Referrer/",
                 "src/classes/cache/",
