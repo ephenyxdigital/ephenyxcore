@@ -69,6 +69,18 @@ abstract class PhenyxAssistantLayer {
     const UNDOCUMENTED_TOPIC_CODE = 'core.screen.undocumented';
 
     /**
+     * Topic servi quand la puce cliquée désigne non pas un écran mais un
+     * REGROUPEMENT du menu — « Clients », « Données locales »… — c'est-à-dire un
+     * onglet intermédiaire qui n'a pas d'écran propre mais porte des enfants.
+     *
+     * Sans lui, ces parents tombaient dans UNDOCUMENTED_TOPIC_CODE et
+     * l'assistant répondait « je ne sais pas t'expliquer cet écran, mais je peux
+     * t'y conduire » — deux fois faux : ce n'est pas un écran, et il n'y a nulle
+     * part où conduire. Cf. PhenyxAssistant::answerForController().
+     */
+    const MENU_GROUP_TOPIC_CODE = 'core.screen.menugroup';
+
+    /**
      * Jeton remplacé par le NOMBRE de familles de menu dans la réponse du tour
      * racine. Cf. buildTopicAnswer().
      */
@@ -680,7 +692,39 @@ abstract class PhenyxAssistantLayer {
 
         }
 
+        // Le bouton porte le nom du MENU, jamais le nom de classe PHP — vaut pour
+        // l'action déclarée par le topic comme pour celle déduite ci-dessus. Cf.
+        // PhenyxAssistantTopic::decorateActionLabels() pour le détail.
+        $answer->suggestedAction = PhenyxAssistantTopic::decorateActionLabels(
+            $answer->suggestedAction,
+            $this->resolveLangId($query->isoCode)
+        );
+
         $quickReplies = !empty($topic['quick_replies']) ? (array) json_decode($topic['quick_replies'], true) : [];
+
+        /*
+         * Quick replies muettes tant que l'écran documenté n'est pas celui qu'a
+         * l'employé sous les yeux — même règle et mêmes raisons que dans
+         * PhenyxAssistant::answerForTopic(), appliquée ici au flux des questions
+         * tapées. Un topic sans liage d'écran (tour, rubrique, notion générale)
+         * n'est pas concerné et garde ses propositions.
+         *
+         * Placé AVANT filterScreenDependentQuickReplies() : quand la règle
+         * s'applique, elle vide la liste et court-circuite du même coup le
+         * chargement paresseux de tous les topics — un aller-retour de moins vers
+         * la base CRM distante.
+         */
+        if ($quickReplies && $idTopic) {
+            $boundController = PhenyxAssistantTopic::getBoundControllerForTopic($idTopic);
+            $currentScreen = isset($query->extra['sourceController'])
+            ? (string) $query->extra['sourceController']
+            : '';
+
+            if ($boundController && $boundController !== $currentScreen) {
+                $quickReplies = [];
+            }
+
+        }
 
         // Retour Jeff 2026-07-22 : certaines quick replies mènent à une action
         // "physique" sur l'écran courant (menu contextuel simulé, bouton mis en

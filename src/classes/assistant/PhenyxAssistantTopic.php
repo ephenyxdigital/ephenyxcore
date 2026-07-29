@@ -717,6 +717,81 @@ class PhenyxAssistantTopic extends PhenyxObjectModel {
      * @param int $idLang
      * @return array|null Action prête pour PhenyxAssistantAnswer::$suggestedAction
      */
+    /**
+     * Complète une action « openTargetController » avec le LIBELLÉ DU MENU de
+     * l'écran visé, quand elle n'en porte pas déjà un.
+     *
+     * ⚠️ Pourquoi cette fonction existe (retour Jeff, 2026-07-27).
+     *
+     * Le libellé déduit était posé par getScreenActionForTopic() — mais celle-ci
+     * n'est appelée QUE lorsque le topic ne déclare aucune action. Or la plupart
+     * des topics d'écran en déclarent une, par exemple
+     * ['type' => 'openTargetController', 'controller' => 'AdminUsers'], sans
+     * libellé. Résultat : le bouton retombait sur le repli historique et
+     * affichait « Ouvrir AdminUsers » — un nom de classe PHP, qui ne veut rien
+     * dire pour un employé, là où le menu qu'il a sous les yeux dit « Liste des
+     * clients ».
+     *
+     * On décore donc l'action APRÈS son assemblage, quelle que soit son origine,
+     * déclarée ou déduite. Rien à rédiger dans les topics : le libellé vient de
+     * back_tab_lang, il est déjà traduit et il suit automatiquement un
+     * renommage d'onglet.
+     *
+     * Trois cas laissés intacts :
+     *  - une action qui porte déjà 'label' (rien à faire) ;
+     *  - une action qui porte 'labelKey' — libellé RÉDIGÉ, prioritaire côté JS,
+     *    cf. renderPhenyxAssistantSuggestedAction() ;
+     *  - un contrôleur absent de back_tab : pas de libellé, repli sur la classe.
+     *
+     * @param array|null $action Action unique ou TABLEAU d'actions (un topic peut
+     *                           en proposer plusieurs, cf. core.tour.company)
+     * @param int        $idLang
+     * @return array|null L'action décorée, dans la même forme qu'en entrée
+     */
+    public static function decorateActionLabels($action, $idLang) {
+
+        if (empty($action) || !is_array($action)) {
+            return $action;
+        }
+
+        // Tableau d'actions : liste sans clé 'type' à sa racine.
+        if (!isset($action['type'])) {
+
+            foreach ($action as $key => $single) {
+                $action[$key] = static::decorateActionLabels($single, $idLang);
+            }
+
+            return $action;
+        }
+
+        if ($action['type'] !== 'openTargetController') {
+            return $action;
+        }
+
+        if (empty($action['controller']) || !empty($action['label']) || !empty($action['labelKey'])) {
+            return $action;
+        }
+
+        try {
+            $idTab = (int) BackTab::getIdFromClassName((string) $action['controller']);
+
+            if ($idTab) {
+                $tab = BackTab::getTab((int) $idLang, $idTab);
+
+                if (is_array($tab) && !empty($tab['name'])) {
+                    $action['label'] = (string) $tab['name'];
+                }
+
+            }
+
+        } catch (\Throwable $e) {
+            // Un libellé manquant dégrade l'ergonomie, il ne doit jamais empêcher
+            // l'action : on rend l'action telle quelle.
+        }
+
+        return $action;
+    }
+
     public static function getScreenActionForTopic($idTopic, $idLang) {
 
         $controller = self::getBoundControllerForTopic($idTopic);
@@ -1187,6 +1262,36 @@ class PhenyxAssistantTopic extends PhenyxObjectModel {
      * @param int    $idLang
      * @return array [['idTopic' => int, 'code' => string, 'label' => string], ...]
      */
+    /**
+     * Extrait l'argument passé à openAjaxController() dans le `function` d'un
+     * onglet de back_tab.
+     *
+     * Les entrées de menu portent leur action sous forme de code, par exemple
+     * `openAjaxController('AdminCustomerPieces', 'INVOICE')`. Le second argument
+     * est ce qui distingue Devis, Commande, Bon de livraison et Facture — quatre
+     * entrées pour un seul contrôleur.
+     *
+     * Rend une chaîne vide quand il n'y a pas d'argument, ce qui est le cas de la
+     * grande majorité des onglets.
+     *
+     * @param string $function Contenu du champ `function` de back_tab
+     * @return string
+     */
+    protected static function extractMenuArgument($function) {
+
+        $function = (string) $function;
+
+        if ($function === '' || strpos($function, ',') === false) {
+            return '';
+        }
+
+        if (!preg_match('/openAjaxController\(\s*[\'"][A-Za-z_]+[\'"]\s*,\s*[\'"]([A-Za-z0-9_-]+)[\'"]/', $function, $m)) {
+            return '';
+        }
+
+        return (string) $m[1];
+    }
+
     public static function getMenuChildrenTopics($parentClassName, $idLang) {
 
         $parentClassName = (string) $parentClassName;
@@ -1214,7 +1319,31 @@ class PhenyxAssistantTopic extends PhenyxObjectModel {
             return [];
         }
 
-        $byClass = [];
+        /*
+         * ⚠️ UNE ENTRÉE PAR ONGLET, PAS PAR CLASSE — corrigé le 2026-07-27.
+         *
+         * Ce tableau était indexé sur `class_name`. Or un même contrôleur peut
+         * occuper PLUSIEURS entrées de menu, distinguées par l'argument passé à
+         * openAjaxController() : dans Gestion Commerciale, AdminCustomerPieces
+         * apparaît cinq fois (Devis, Commandes, Bons de livraison, Factures…) et
+         * AdminSupplierPieces six fois, l'argument valant le type de pièce.
+         *
+         * Les entrées s'écrasaient donc mutuellement, la dernière gagnant : la
+         * rubrique « Ventes » ne rendait que 3 pastilles sur 6, et « Achats » 3
+         * sur 8. Devis, Commandes et Bons de livraison n'existaient tout
+         * simplement pas pour l'assistant, alors qu'ils sont sous les yeux de
+         * l'employé dans son menu.
+         *
+         * La bonne clé est l'onglet lui-même : chaque ligne de back_tab est un
+         * écran distinct du point de vue de l'employé, même quand deux lignes
+         * pointent la même classe PHP.
+         *
+         * L'argument est conservé dans 'arg' — il ne coûte rien, il documente ce
+         * que la pastille désigne réellement, et il servira le jour où le bouton
+         * d'ouverture devra rouvrir le bon type de pièce plutôt que l'écran nu.
+         */
+
+        $entries = [];
 
         foreach ($children as $child) {
 
@@ -1229,13 +1358,25 @@ class PhenyxAssistantTopic extends PhenyxObjectModel {
                 continue;
             }
 
-            $byClass[(string) $child['class_name']] = isset($child['name'])
-            ? (string) $child['name']
-            : (string) $child['class_name'];
+            $entries[] = [
+                'className' => (string) $child['class_name'],
+                'label'     => isset($child['name']) && $child['name'] !== ''
+                ? (string) $child['name']
+                : (string) $child['class_name'],
+                'arg'       => static::extractMenuArgument(isset($child['function']) ? $child['function'] : ''),
+            ];
         }
 
-        if (!$byClass) {
+        if (!$entries) {
             return [];
+        }
+
+        // Dédoublonnage des classes pour la seule requête CRM ci-dessous : cinq
+        // entrées AdminCustomerPieces ne justifient pas cinq fois le même IN().
+        $byClass = [];
+
+        foreach ($entries as $entry) {
+            $byClass[$entry['className']] = $entry['label'];
         }
 
         /* --- 2. Les topics liés à ces écrans, depuis la base CRM ----------- */
@@ -1249,12 +1390,33 @@ class PhenyxAssistantTopic extends PhenyxObjectModel {
                     ->where('ts.controller_name IN (\'' . implode('\', \'', array_map('pSQL', array_keys($byClass))) . '\')')
             );
         } catch (\Throwable $e) {
-            return [];
+            /*
+             * ⚠️ On CONTINUE avec une liste vide au lieu de rendre [] (corrigé le
+             * 2026-07-27). Cf. la note ci-dessous : les puces viennent du menu,
+             * pas du wiki. Une base CRM injoignable doit dégrader la réponse en
+             * « voici les écrans, non documentés », pas la supprimer.
+             */
+            $rows = [];
         }
 
-        if (!is_array($rows) || !$rows) {
-            return [];
+        if (!is_array($rows)) {
+            $rows = [];
         }
+
+        /*
+         * ⚠️ PAS de `return []` quand $rows est vide.
+         *
+         * C'était le cas jusqu'au 2026-07-27, et cela contredisait la règle posée
+         * juste en dessous à l'étape 4 : « tout écran visible a sa puce, documenté
+         * ou non ». Le menu est le squelette, les topics ne sont que la chair.
+         *
+         * Conséquence du bug : un regroupement dont AUCUN enfant n'était encore
+         * documenté ne rendait rien du tout — donc pas de puces, donc l'assistant
+         * répondait « je ne sais rien » sur le parent ET n'offrait aucun chemin,
+         * alors qu'il connaissait parfaitement les noms de ses enfants. C'est
+         * exactement le pire cas : celui d'un domaine fonctionnel neuf, où
+         * l'employé a le plus besoin d'être orienté.
+         */
 
         /* --- 3. Un seul topic par écran, le plus « présentation » ---------- */
 
@@ -1282,13 +1444,21 @@ class PhenyxAssistantTopic extends PhenyxObjectModel {
 
         $out = [];
 
-        foreach ($byClass as $className => $menuLabel) {
+        // On boucle sur les ENTRÉES de menu, pas sur les classes : cf. la note de
+        // l'étape 1. Plusieurs entrées peuvent partager le même topic — c'est le
+        // cas voulu pour les types de pièces, où Devis et Facture désignent le
+        // même écran filtré différemment (arbitrage du 2026-07-27).
+        foreach ($entries as $entry) {
+
+            $className = $entry['className'];
+            $menuLabel = $entry['label'];
 
             // Même renversement que dans getMenuFamilyTopics() : tout écran visible
             // a sa puce, documenté ou non.
             $documented = isset($topicByClass[$className]);
 
             $out[] = [
+                'arg' => $entry['arg'],
                 'idTopic' => $documented ? $topicByClass[$className]['idTopic'] : 0,
                 'code'    => $documented ? $topicByClass[$className]['code'] : '',
                 // Le libellé vient du MENU, pas du topic : c'est le mot que
@@ -1347,14 +1517,26 @@ class PhenyxAssistantTopic extends PhenyxObjectModel {
          * n'y a pas de topic, et on n'écarte une puce sans identité d'aucune sorte
          * que parce qu'on ne saurait pas quoi en faire au clic.
          */
+        /*
+         * ⚠️ L'ARGUMENT DE MENU ENTRE DANS LA CLÉ — ajouté le 2026-07-27.
+         *
+         * Sans lui, le correctif d'indexation de getMenuChildrenTopics() serait
+         * resté sans effet : les cinq entrées AdminCustomerPieces portent le
+         * MÊME idTopic (un topic par contrôleur, arbitrage du jour), donc un
+         * dédoublonnage sur le seul idTopic les aurait de nouveau réduites à une.
+         * Deux entrées ne sont le même écran que si elles partagent aussi leur
+         * argument.
+         */
         $keyOf = function ($chip) {
 
+            $arg = isset($chip['arg']) && $chip['arg'] !== '' ? '#' . (string) $chip['arg'] : '';
+
             if (!empty($chip['idTopic'])) {
-                return 't' . (int) $chip['idTopic'];
+                return 't' . (int) $chip['idTopic'] . $arg;
             }
 
             if (!empty($chip['controller'])) {
-                return 'c' . (string) $chip['controller'];
+                return 'c' . (string) $chip['controller'] . $arg;
             }
 
             return null;

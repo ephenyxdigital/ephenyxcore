@@ -3121,9 +3121,25 @@ abstract class Plugin {
             $meta->plugin = $this->name;
 
             foreach (Language::getLanguages(true) as $lang) {
+				$file = _EPH_PLUGIN_DIR_ . $this->name . '/translations/' . $lang['iso_code']  . '/meta.php';
+				
+            	if (file_exists($file)) {
+                	@include $file;
+                
 
-                $meta->title[$lang['id_lang']] = $name;
-                $meta->url_rewrite[$lang['id_lang']] = Tools::str2url($name);
+                	if (!empty($_METAS[$page])) {
+						$ret = stripslashes($_METAS[$page]);
+                	} else {
+                    	$ret = $name;
+                	}
+					$meta->title[$lang['id_lang']] = $ret;
+                	$meta->url_rewrite[$lang['id_lang']] = Tools::str2url($ret);
+
+            	} else {
+					$meta->title[$lang['id_lang']] = $name;
+                	$meta->url_rewrite[$lang['id_lang']] = Tools::str2url($name);
+				}
+                
 
             }
 
@@ -3165,8 +3181,161 @@ abstract class Plugin {
         
 
     }
+	
+	public function translateWord($string, $id_lang, $type = 'plugin', $source = null) {
 
-    public function installPluginTab($class_name, $name, $function = true, $idParent = null, $parentName = null, $position = null, $openFunction = null, $divider = 0, $fa_duatone = null, $common_function = null) {
+        $_PLUGINS = [];
+        $_PLUG = [];
+        $iso = Language::getIsoById($id_lang);
+        $key = md5($string);
+        $ret = null;
+
+        switch ($type) {
+        case 'plugin':
+            $file = _EPH_PLUGIN_DIR_ . $this->name . '/translations/' . $iso . '.php';
+
+            if (file_exists($file)) {
+                @include $file;
+                $_PLUG = $_PLUGINS;
+                $PhenyxShopKey = trim(strtolower('<{' . $this->name . '}phenyxshop>' . $this->name) . '_' . $key);
+
+                if (!empty($_PLUG[$PhenyxShopKey])) {
+                    $ret = stripslashes($_PLUG[$PhenyxShopKey]);
+                } else
+
+                if (array_key_exists($PhenyxShopKey, $_PLUG)) {
+                    $ret = stripslashes($_PLUG[$PhenyxShopKey]);
+                } else {
+                    $ret = $string;
+                }
+
+            }
+
+            break;
+        case 'admin':
+
+            if (is_null($source)) {
+                return $string;
+            }
+
+            $file = _EPH_PLUGIN_DIR_ . $this->name . '/translations/' . $iso . '/admin.php';
+
+            if (file_exists($file)) {
+                @include $file;
+                $_PLUG = $_LANGADM;
+                $PhenyxShopKey = trim($source . $key);
+
+                if (!empty($_PLUG[$PhenyxShopKey])) {
+                    $ret = stripslashes($_PLUG[$PhenyxShopKey]);
+                } else
+
+                if (array_key_exists($PhenyxShopKey, $_PLUG)) {
+                    $ret = stripslashes($_PLUG[$PhenyxShopKey]);
+                } else {
+                    $ret = $string;
+                }
+
+            }
+
+            break;
+        case 'class':
+
+            if (is_null($source)) {
+                return $string;
+            }
+
+            $file = _EPH_PLUGIN_DIR_ . $this->name . '/translations/' . $iso . '/class.php';
+
+            if (file_exists($file)) {
+                @include $file;
+                $_PLUG = $_LANGCLASS;
+                $PhenyxShopKey = trim($source . $key);
+
+                if (!empty($_PLUG[$PhenyxShopKey])) {
+                    $ret = stripslashes($_PLUG[$PhenyxShopKey]);
+                } else
+
+                if (array_key_exists($PhenyxShopKey, $_PLUG)) {
+                    $ret = stripslashes($_PLUG[$PhenyxShopKey]);
+                } else {
+                    $ret = $string;
+                }
+
+            }
+
+            break;
+        case 'front':
+
+            if (is_null($source)) {
+                return $string;
+            }
+
+            $file = _EPH_PLUGIN_DIR_ . $this->name . '/translations/' . $iso . '/front.php';
+
+            if (file_exists($file)) {
+                @include $file;
+                $_PLUG = $_LANGFRONT;
+                $PhenyxShopKey = trim($source . $key);
+
+                if (!empty($_PLUG[$PhenyxShopKey])) {
+                    $ret = stripslashes($_PLUG[$PhenyxShopKeyFile]);
+                } else {
+                    $ret = $string;
+                }
+
+            }
+
+            break;
+		case 'tab':
+
+            if (is_null($source)) {
+                return $string;
+            }
+
+            $file = _EPH_PLUGIN_DIR_ . $this->name . '/translations/' . $iso . '/tab.php';
+
+            if (file_exists($file)) {
+                @include $file;
+                
+
+                if (!empty($_TABS[$source])) {
+                    $ret = stripslashes($_TABS[$source]);
+                } else {
+                    $ret = $string;
+                }
+
+            }
+
+            break;
+		case 'meta':
+
+            if (is_null($source)) {
+                return $string;
+            }
+
+            $file = _EPH_PLUGIN_DIR_ . $this->name . '/translations/' . $iso . '/meta.php';
+
+            if (file_exists($file)) {
+                @include $file;
+                
+
+                if (!empty($_METAS[$source])) {
+                    $ret = stripslashes($_METAS[$source]);
+                } else {
+                    $ret = $string;
+                }
+
+            }
+
+            break;
+
+        }
+
+        return $ret;
+
+    }
+
+    public function installPluginTab($class_name, $name, $function = true, $idParent = null, $parentName = null, $position = null, $openFunction = null, $divider = 0, $fa_duatone = null, $common_function = null, $source = null) {
 
         if (is_null($parentName) && is_null($idParent)) {
             return false;
@@ -3215,8 +3384,17 @@ abstract class Plugin {
             foreach (Language::getLanguages(true) as $lang) {
 
                 if ($lang['id_lang'] != $this->context->language->id) {
+					$file = _EPH_PLUGIN_DIR_ . $this->name . '/translations/' .$lang['iso_code'] . '/tab.php';
+					if (!is_null($source) && file_exists($file)) {
+                		@include $file;
+                
 
-                    if (!empty($this->_translations[$lang['iso_code']]['admin'][$PhenyxShopKey])) {
+                		if (!empty($_TABS[$source])) {
+                    		$ret = stripslashes($_TABS[$source]);
+							$name = stripslashes($_TABS[$source]);
+                		} 
+
+            		} else if (!empty($this->_translations[$lang['iso_code']]['admin'][$PhenyxShopKey])) {
                         $name = stripslashes($this->_translations[$lang['iso_code']]['admin'][$PhenyxShopKey]);
                     }
 
@@ -3255,8 +3433,17 @@ abstract class Plugin {
             foreach (Language::getLanguages(true) as $lang) {
 
                 if ($lang['id_lang'] != $this->context->language->id) {
+					$file = _EPH_PLUGIN_DIR_ . $this->name . '/translations/' .$lang['iso_code'] . '/tab.php';
+					if (!is_null($source) && file_exists($file)) {
+                		@include $file;
+                
 
-                    if (!empty($this->_translations[$lang['iso_code']]['admin'][$PhenyxShopKey])) {
+                		if (!empty($_TABS[$source])) {
+                    		$ret = stripslashes($_TABS[$source]);
+							$name = stripslashes($_TABS[$source]);
+                		} 
+
+            		} else if (!empty($this->_translations[$lang['iso_code']]['admin'][$PhenyxShopKey])) {
                         $name = stripslashes($this->_translations[$lang['iso_code']]['admin'][$PhenyxShopKey]);
                     }
 
@@ -4376,158 +4563,7 @@ abstract class Plugin {
         return empty($value) ? null : Tools::jsonDecode($value, true);
     }
 
-    public function translateWord($string, $id_lang, $type = 'plugin', $source = null) {
-
-        $_PLUGINS = [];
-        $_PLUG = [];
-        $iso = Language::getIsoById($id_lang);
-        $key = md5($string);
-        $ret = null;
-
-        switch ($type) {
-        case 'plugin':
-            $file = _EPH_PLUGIN_DIR_ . $this->name . '/translations/' . $iso . '.php';
-
-            if (file_exists($file)) {
-                @include $file;
-                $_PLUG = $_PLUGINS;
-                $PhenyxShopKey = trim(strtolower('<{' . $this->name . '}phenyxshop>' . $this->name) . '_' . $key);
-
-                if (!empty($_PLUG[$PhenyxShopKey])) {
-                    $ret = stripslashes($_PLUG[$PhenyxShopKey]);
-                } else
-
-                if (array_key_exists($PhenyxShopKey, $_PLUG)) {
-                    $ret = stripslashes($_PLUG[$PhenyxShopKey]);
-                } else {
-                    $ret = $string;
-                }
-
-            }
-
-            break;
-        case 'admin':
-
-            if (is_null($source)) {
-                return $string;
-            }
-
-            $file = _EPH_PLUGIN_DIR_ . $this->name . '/translations/' . $iso . '/admin.php';
-
-            if (file_exists($file)) {
-                @include $file;
-                $_PLUG = $_LANGADM;
-                $PhenyxShopKey = trim($source . $key);
-
-                if (!empty($_PLUG[$PhenyxShopKey])) {
-                    $ret = stripslashes($_PLUG[$PhenyxShopKey]);
-                } else
-
-                if (array_key_exists($PhenyxShopKey, $_PLUG)) {
-                    $ret = stripslashes($_PLUG[$PhenyxShopKey]);
-                } else {
-                    $ret = $string;
-                }
-
-            }
-
-            break;
-        case 'class':
-
-            if (is_null($source)) {
-                return $string;
-            }
-
-            $file = _EPH_PLUGIN_DIR_ . $this->name . '/translations/' . $iso . '/class.php';
-
-            if (file_exists($file)) {
-                @include $file;
-                $_PLUG = $_LANGCLASS;
-                $PhenyxShopKey = trim($source . $key);
-
-                if (!empty($_PLUG[$PhenyxShopKey])) {
-                    $ret = stripslashes($_PLUG[$PhenyxShopKey]);
-                } else
-
-                if (array_key_exists($PhenyxShopKey, $_PLUG)) {
-                    $ret = stripslashes($_PLUG[$PhenyxShopKey]);
-                } else {
-                    $ret = $string;
-                }
-
-            }
-
-            break;
-        case 'front':
-
-            if (is_null($source)) {
-                return $string;
-            }
-
-            $file = _EPH_PLUGIN_DIR_ . $this->name . '/translations/' . $iso . '/front.php';
-
-            if (file_exists($file)) {
-                @include $file;
-                $_PLUG = $_LANGFRONT;
-                $PhenyxShopKey = trim($source . $key);
-
-                if (!empty($_PLUG[$PhenyxShopKey])) {
-                    $ret = stripslashes($_PLUG[$PhenyxShopKeyFile]);
-                } else {
-                    $ret = $string;
-                }
-
-            }
-
-            break;
-		case 'tab':
-
-            if (is_null($source)) {
-                return $string;
-            }
-
-            $file = _EPH_PLUGIN_DIR_ . $this->name . '/translations/' . $iso . '/tab.php';
-
-            if (file_exists($file)) {
-                @include $file;
-                
-
-                if (!empty($_TABS[$source])) {
-                    $ret = stripslashes($_TABS[$source]);
-                } else {
-                    $ret = $string;
-                }
-
-            }
-
-            break;
-		case 'meta':
-
-            if (is_null($source)) {
-                return $string;
-            }
-
-            $file = _EPH_PLUGIN_DIR_ . $this->name . '/translations/' . $iso . '/meta.php';
-
-            if (file_exists($file)) {
-                @include $file;
-                
-
-                if (!empty($_METAS[$source])) {
-                    $ret = stripslashes($_METAS[$source]);
-                } else {
-                    $ret = $string;
-                }
-
-            }
-
-            break;
-
-        }
-
-        return $ret;
-
-    }
+    
 
 }
 

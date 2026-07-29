@@ -584,6 +584,45 @@ class PhenyxAssistant {
             }
 
         }
+
+        // Le bouton porte le nom du MENU, jamais le nom de classe PHP. Vaut pour
+        // l'action déclarée par le topic comme pour celle déduite ci-dessus.
+        $answer->suggestedAction = PhenyxAssistantTopic::decorateActionLabels(
+            $answer->suggestedAction,
+            $idLang
+        );
+
+        /*
+         * ─── QUICK REPLIES : MUETTES TANT QUE L'ÉCRAN N'EST PAS OUVERT ───
+         * (retour Jeff, 2026-07-27)
+         *
+         * En descendant l'arbre du menu depuis le tour — Listes, puis Clients,
+         * puis « Gestion des groupes de clients » — l'employé n'a encore RIEN
+         * ouvert. Lui proposer « Comment créer un groupe ? » ou « À quoi servent
+         * les autorisations de plugins ? » revient à l'inviter à agir sur un écran
+         * qu'il ne voit pas. Une seule proposition a du sens à cet instant :
+         * ouvrir l'écran. Les quick replies reprendront tout leur sens une fois
+         * qu'il y sera, l'ÉTAGE 0 les lui servant à l'ouverture.
+         *
+         * La règle ne s'applique qu'aux topics LIÉS À UN ÉCRAN : un topic
+         * transverse (tour, rubrique de menu, notion générale) n'a pas d'écran de
+         * référence et garde ses propositions.
+         *
+         * Complémentaire de PhenyxAssistantLayer::filterScreenDependentQuickReplies(),
+         * qui traite un cas plus étroit — les quick replies dont l'ACTION exige une
+         * liste ouverte. Ici c'est le SUJET tout entier qui est hors de portée.
+         */
+        $boundController = PhenyxAssistantTopic::getBoundControllerForTopic(
+            (int) $row['id_phenyx_assistant_topic']
+        );
+        $currentScreen = isset($query->extra['sourceController'])
+        ? (string) $query->extra['sourceController']
+        : '';
+
+        if ($boundController && $boundController !== $currentScreen) {
+            $answer->quickReplies = [];
+        }
+
         $answer->raw = [
             // Résolution exacte, au même titre qu'un alias : aucune approximation
             // n'est intervenue. Le log doit le refléter.
@@ -708,14 +747,6 @@ class PhenyxAssistant {
 
         }
 
-        $row = PhenyxAssistantTopic::getRowByCode(PhenyxAssistantLayer::UNDOCUMENTED_TOPIC_CODE, $idLang);
-        $text = ($row && !empty($row['answer'])) ? (string) $row['answer'] : '';
-        // Jeton nommé, même raison que FAMILY_COUNT_TOKEN : pas de sprintf sur du
-        // texte de wiki.
-        $text = str_replace('{screen}', '<strong>' . $label . '</strong>', $text);
-
-        $answer = PhenyxAssistantAnswer::text($text, null, 0.7);
-
         /*
          * Un PARENT de menu n'a pas d'écran à ouvrir : proposer « Ouvrir Gestion
          * des Partenaires » sur une famille mènerait à un clic sans effet. On ne
@@ -723,6 +754,50 @@ class PhenyxAssistant {
          * il n'est pas dans la liste des parents connus du menu.
          */
         $action = PhenyxAssistantTopic::buildOpenActionForController($controller, $idLang);
+
+        /*
+         * ─── REGROUPEMENT DE MENU ou ÉCRAN NON DOCUMENTÉ ? (2026-07-27) ───
+         *
+         * Retour de Jeff : cliquer « Clients » ou « Données locales » depuis la
+         * famille Listes donnait « Je n'ai pas encore d'information sur Clients.
+         * L'écran existe bien dans ton menu — je peux t'y conduire ». Deux
+         * affirmations fausses d'un coup : ce n'est pas un écran, et il n'y a nulle
+         * part où conduire. Ces onglets intermédiaires (AdminParentCustomers,
+         * AdminParentLocalData) n'ont pas de contrôleur, seulement des enfants.
+         *
+         * La distinction est faite par la DONNÉE, pas par une convention de nommage
+         * sur « AdminParent… » : est un regroupement ce qui n'a aucun écran à ouvrir
+         * ($action null) mais porte des enfants visibles. Un plugin qui nommerait
+         * autrement ses parents est traité correctement sans rien déclarer.
+         *
+         * L'intérêt est qu'il n'y a AUCUN contenu à écrire : la réponse est dérivée
+         * du menu de cet employé. Tout regroupement, présent ou futur, du cœur ou
+         * d'un plugin, oriente désormais vers ses enfants.
+         */
+        $children = PhenyxAssistantTopic::getMenuChildrenTopics($controller, $idLang);
+        $isMenuGroup = (!$action && !empty($children));
+
+        $row = PhenyxAssistantTopic::getRowByCode(
+            $isMenuGroup
+            ? PhenyxAssistantLayer::MENU_GROUP_TOPIC_CODE
+            : PhenyxAssistantLayer::UNDOCUMENTED_TOPIC_CODE,
+            $idLang
+        );
+        $text = ($row && !empty($row['answer'])) ? (string) $row['answer'] : '';
+        // Jeton nommé, même raison que FAMILY_COUNT_TOKEN : pas de sprintf sur du
+        // texte de wiki.
+        $text = str_replace('{screen}', '<strong>' . $label . '</strong>', $text);
+
+        // Un regroupement répond de façon sûre — il énumère ce que le menu dit —
+        // là où « écran non documenté » est un aveu d'ignorance.
+        $answer = PhenyxAssistantAnswer::text($text, null, $isMenuGroup ? 0.85 : 0.7);
+
+        if ($isMenuGroup) {
+            $answer->topicChips = PhenyxAssistantTopic::mergeTopicChips(
+                $children,
+                (array) $answer->topicChips
+            );
+        }
 
         if ($action) {
             $answer->suggestedAction = $action;

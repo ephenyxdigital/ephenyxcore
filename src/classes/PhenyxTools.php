@@ -577,6 +577,18 @@ class PhenyxTools {
 		return $this->apiCall('checkCoreUpdate', ['channel' => $channel, 'version' => _EPH_VERSION_]);
 	}
 
+	/**
+	 * Chemin de mise a jour ordonne entre la version installee et la derniere
+	 * publiee du canal. Ajoute le 2026-07-28 : voir la note en tete de
+	 * CoreUpgrader::run() (plugin ph_upgrader) — les paquets etant des deltas,
+	 * un site en retard de deux versions doit les appliquer l'une apres
+	 * l'autre.
+	 */
+	public function getUpgradePath($channel = 'stable') {
+
+		return $this->apiCall('getUpgradePath', ['channel' => $channel, 'version' => _EPH_VERSION_]);
+	}
+
 	public function getCorePackage($version) {
 
 		return $this->apiCall('getCorePackage', ['version' => $version]);

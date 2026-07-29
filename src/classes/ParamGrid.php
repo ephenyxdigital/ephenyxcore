@@ -729,7 +729,22 @@ class ParamGrid {
 							if (is_array($optValue)) {
 								$jsScript .= '      ' . $this->deployArrayScript($option, $optValue) . PHP_EOL;
 							} else {
-								$jsScript .= '      ' . $option . ': ' . $optValue . ',' . PHP_EOL;
+								/*
+								 * ⚠️ Transtypage des booléens — ajouté le 2026-07-27.
+								 *
+								 * En PHP, false concaténé à une chaîne rend une chaîne VIDE.
+								 * Une option posée à false produisait donc `showTitle: ,`
+								 * dans l'objet JavaScript : une erreur de syntaxe qui
+								 * interrompt tout le script, si bien que l'objet de grille
+								 * n'est jamais défini et que la grille ne s'affiche pas.
+								 *
+								 * Constaté sur AdminCustomerGroups (`showTitle = false`) ;
+								 * cinq contrôleurs de ph_lms écrivent la même chose. La
+								 * convention de pqGrid étant 0/1 partout ailleurs
+								 * (showHeader:1, wrap:1…), on aligne à l'ÉMISSION plutôt que
+								 * de compter sur la discipline de chaque appelant.
+								 */
+								$jsScript .= '      ' . $option . ': ' . (is_bool($optValue) ? (int) $optValue : $optValue) . ',' . PHP_EOL;
 							}
 						}
 
