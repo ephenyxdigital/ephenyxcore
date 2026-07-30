@@ -161,7 +161,12 @@ abstract class ExternalApi {
 
         $auth = $this->provider->authParts();
         $url = rtrim((string) $this->provider->base_url, '/') . '/' . ltrim((string) $path, '/');
-        $allQuery = array_merge($query, $auth['query']);
+
+        // extraQuery() est ajoute a l'URL mais N'ENTRE PAS dans l'empreinte de
+        // cache ni dans le resume : c'est la que passent les cles portees par
+        // une classe fille. Une cle ne doit jamais se retrouver en clair dans
+        // la table api_cache.
+        $allQuery = array_merge($query, $auth['query'], $this->extraQuery());
 
         if (!empty($allQuery)) {
             $url .= (strpos($url, '?') === false ? '?' : '&') . http_build_query($allQuery);
@@ -178,6 +183,20 @@ abstract class ExternalApi {
         }
 
         return $payload;
+    }
+
+    /**
+     * Parametres d'URL ajoutes par une classe fille, hors empreinte de cache.
+     *
+     * Prevu pour les fournisseurs dont la cle ne vient pas d'api_provider —
+     * typiquement une cle deja stockee ailleurs en configuration, qu'on ne veut
+     * pas faire ressaisir. Voir TranslateApi.
+     *
+     * @return array<string,string>
+     */
+    protected function extraQuery() {
+
+        return [];
     }
 
     /**

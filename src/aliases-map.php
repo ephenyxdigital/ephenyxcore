@@ -258,6 +258,7 @@ return [
     'TopMenuColumnWrap' => 'EphenyxDigital\\QuantumCore\\TopMenuColumnWrap',
     'TopMenuElements' => 'EphenyxDigital\\QuantumCore\\TopMenuElements',
     'Translate' => 'EphenyxDigital\\QuantumCore\\Translate',
+    'TranslateApi' => 'EphenyxDigital\\QuantumCore\\TranslateApi',
     'Translation' => 'EphenyxDigital\\QuantumCore\\Translation',
     'Tree' => 'EphenyxDigital\\QuantumCore\\Tree',
     'TreeToolbar' => 'EphenyxDigital\\QuantumCore\\TreeToolbar',

@@ -5798,35 +5798,42 @@ class PhenyxTool {
         return $topbars;
     }
 
+    /**
+     * Traduction automatique.
+     *
+     * Simple relais vers TranslateApi depuis le 2026-07-30. Le corps precedent
+     * appelait TranslateClient sans cache ni garde : chaque appel etait facture,
+     * une meme chaine se payait autant de fois qu'on la demandait, et une
+     * exception — panne reseau, quota, cle invalide — remontait sans etre
+     * attrapee. Il empilait par ailleurs une ligne de plus dans `translation`
+     * a chaque passage, sans jamais verifier si elle s'y trouvait deja.
+     *
+     * $google_api_key n'est plus lu : la cle vient de la configuration
+     * (EPH_GOOGLE_TRANSLATE_API_KEY) ou du fournisseur. Le parametre reste en
+     * place pour ne casser aucun appelant.
+     *
+     * @param string      $google_api_key Ignore, conserve pour compatibilite
+     * @param string      $text
+     * @param string      $target
+     * @param string|null $file_name
+     *
+     * @return array{translation: string}
+     */
     public function getGoogleTranslation($google_api_key, $text, $target, $file_name = null) {
 
         if (empty($text)) {
-            return $text;
+            return ['translation' => $text];
         }
 
-        $translate = new TranslateClient([
-            'key' => $google_api_key,
-        ]);
+        $api = class_exists('TranslateApi') ? TranslateApi::create() : null;
 
-        $result = $translate->translate($text, [
-            'target' => $target,
-        ]);
-        $translation = new Translation();
-        $translation->iso_code = $target;
-        $translation->file_name = $file_name;
-        $translation->origin = $text;
-        $translation->translation = $result['text'];
-        $translation->date_upd = date('Y-m-d H:i:s');
-        try {
-            $translation->add();
-        } catch (exception $e) {
-            PhenyxLogger::addLog('getGoogleTranslation', 1, null, 'PhenyxTool', $e->getMessage(), true, 0);
+        // Fournisseur absent ou eteint : on rend la source, comme le fait la
+        // couche partout ailleurs.
+        if ($api === null) {
+            return ['translation' => $text];
         }
 
-        $return = [
-            'translation' => $result['text'],
-        ];
-        return $return;
+        return ['translation' => $api->translate($text, $target, null, $file_name)];
     }
 
     public function getRedisSeverbyId($idServer) {
