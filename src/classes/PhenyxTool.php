@@ -2139,6 +2139,64 @@ class PhenyxTool {
     $w('</FilesMatch>');
     $w();
 
+    /*
+     * ── FICHIERS .txt DE DEBOGAGE ────────────────────────────────────────────
+     *
+     * POURQUOI CE BLOC EXISTE.
+     *
+     * Le code du noyau et des plugins comporte une trentaine d'appels de la
+     * forme « fopen("testQuelqueChose.txt", "w") », en CHEMIN RELATIF — donc a
+     * la racine du site. Ce sont des traces de mise au point, certaines
+     * inconditionnelles : celle d'AdminPlugins::getRequest() se reecrit a chaque
+     * ouverture de l'ecran des extensions. Rien dans les regles ci-dessus ne
+     * couvrait l'extension .txt, ces fichiers etaient donc servis en clair a qui
+     * connaissait leur nom.
+     *
+     * La bonne correction reste de retirer les fopen un par un. Ce bloc ferme la
+     * porte en attendant, et couvrira aussi ceux qu'on oubliera d'enlever.
+     *
+     * ── DEUX REGLES, ET NON UNE ──
+     *
+     * 1. Un FilesMatch borne aux prefixes « test » et « log », qui sont ceux de
+     *    TOUS les fichiers de mise au point recenses. Il ne depend d'aucun
+     *    module optionnel : si mod_rewrite manque, la protection tient quand
+     *    meme. Et il ne peut atteindre ni robots.txt ni un fichier de validation
+     *    de certificat, dont les noms ne commencent pas ainsi.
+     *
+     * 2. Une regle mod_rewrite qui refuse tout le reste des .txt, en epargnant
+     *    deux chemins.
+     *
+     * ⚠️ LES DEUX EXCEPTIONS SONT INDISPENSABLES.
+     *
+     *   /robots.txt          — sans lui, plus d'indexation.
+     *   /.well-known/        — l'autorite de certification y depose un fichier
+     *                          .txt au nom aleatoire pour valider le domaine.
+     *                          Le bloquer fait echouer le RENOUVELLEMENT DU
+     *                          CERTIFICAT SSL, et le symptome n'apparait que des
+     *                          mois plus tard, le jour de l'expiration.
+     *
+     * C'est pour cette seconde exception que la regle passe par mod_rewrite :
+     * FilesMatch ne voit que le nom du fichier, jamais le repertoire, et le
+     * fichier de validation porte un nom hexadecimal impossible a distinguer.
+     */
+    $w('# ── Fichiers .txt (traces de mise au point) ────────────────────────────────');
+    $w('<FilesMatch "^(test|log)[A-Za-z0-9_-]*\.txt$">');
+    $w('    <IfModule mod_authz_core.c>');
+    $w('        Require all denied');
+    $w('    </IfModule>');
+    $w('    <IfModule !mod_authz_core.c>');
+    $w('        Order allow,deny');
+    $w('        Deny from all');
+    $w('    </IfModule>');
+    $w('</FilesMatch>');
+    $w();
+    $w('<IfModule mod_rewrite.c>');
+    $w('    RewriteCond %{REQUEST_URI} !^/\.well-known/');
+    $w('    RewriteCond %{REQUEST_URI} !^/robots\.txt$');
+    $w('    RewriteRule \.txt$ - [F,L]');
+    $w('</IfModule>');
+    $w();
+
     $w('# ── Protection des répertoires cachés et outils ────────────────────────────');
     $w('<IfModule mod_rewrite.c>');
     $w('    RewriteRule ^(\.git|\.svn|node_modules|vendor/bin)(/|$) - [F,L]');
@@ -2877,27 +2935,34 @@ class PhenyxTool {
         $plugToCheck = [];
 
         
-        if (is_dir($this->context->theme->path . 'css/plugins/')) {
-            $css = glob($this->context->theme->path . 'css/plugins/' . "*", GLOB_ONLYDIR);
+        /*
+         * $css, $js et $plugs etaient alimentees SOUS un if (is_dir(...)) mais
+         * parcourues EN DEHORS : quand le dossier n'existe pas — ou quand
+         * glob() rend false — le foreach portait sur une variable indefinie.
+         * D'ou des « Undefined variable » dans les journaux, et un foreach sur
+         * null, fatal a partir de PHP 8.
+         */
+        foreach (['css/plugins/', 'js/plugins/', 'plugins/'] as $sousDossier) {
+
+            $racine = $this->context->theme->path . $sousDossier;
+
+            if (!is_dir($racine)) {
+                continue;
+            }
+
+            $trouves = glob($racine . '*', GLOB_ONLYDIR);
+
+            if (!is_array($trouves)) {
+                continue;
+            }
+
+            foreach ($trouves as $chemin) {
+                $plugToCheck[] = basename($chemin);
+            }
 
         }
-        foreach($css as $path) {
-           $plugToCheck[] = basename($path);
-        }
-        
-        if (is_dir($this->context->theme->path . 'js/plugins/')) {
-            $js = glob($this->context->theme->path . 'js/plugins/' . "*", GLOB_ONLYDIR);
-        }
-        foreach($js as $path) {
-           $plugToCheck[] = basename($path);
-        }
-        
-        if (is_dir($this->context->theme->path . 'plugins/')) {
-            $plugs = glob($this->context->theme->path . 'plugins/' . "*", GLOB_ONLYDIR);
-        }
-        foreach($plugs as $path) {
-           $plugToCheck[] = basename($path);
-        }
+
+        $plugToCheck = array_unique($plugToCheck);
         
         $folder = [];
         $plugins = Plugin::getPluginsOnDisk();
@@ -2932,7 +2997,12 @@ class PhenyxTool {
 
         }
 
-        Hook::getInstance()->exec('cleanThemeDirectory', ['plugintochecks' => $plugintochecks]);
+        // La variable s'appelait $plugintochecks, qui n'existe nulle part :
+        // le hook recevait null et journalisait un « Undefined variable » a
+        // chaque nettoyage. Le nom reel est $plugToCheck. On garde la cle
+        // 'plugintochecks' telle quelle : c'est le contrat public du hook,
+        // un greffon tiers peut l'attendre.
+        Hook::getInstance()->exec('cleanThemeDirectory', ['plugintochecks' => $plugToCheck]);
 
     }
 
@@ -2972,20 +3042,43 @@ class PhenyxTool {
             $iterator->append(new DirectoryIterator(_EPH_ROOT_DIR_ . '/' . $directory . '/'));
         }
 
+        /*
+         * Reecrit le 7 aout 2026.
+         *
+         * L'ancienne boucle calculait le dossier a nettoyer ainsi :
+         *
+         *     $path = str_replace($fileName, '', $filePath);
+         *
+         * Deux consequences.
+         *
+         * 1. $path valait le dossier PARENT, le meme pour toutes les entrees.
+         *    removeEmptyDirs() etait donc rappelee sur includes/plugins/ une
+         *    fois par plugin — quatre-vingts fois, a rebalayer l'arborescence
+         *    entiere a chaque tour. C'est ce qui multipliait les memes
+         *    avertissements dans les journaux.
+         *
+         * 2. str_replace() est aveugle. Pour l'entree « . » de DirectoryIterator,
+         *    il retirait TOUS les points du chemin : /var/www/vhosts/ephenyx.io/
+         *    devenait /var/www/vhosts/ephenyxio/. Le is_dir() suivant echouait,
+         *    ce qui masquait le probleme — par chance, pas par construction.
+         *
+         * On parcourt desormais les sous-dossiers immediats de chaque racine,
+         * une seule fois chacun, en s'appuyant sur getPathname() plutot que sur
+         * une soustraction de chaine.
+         */
         foreach ($iterator as $file) {
-            $fileName = $file->getFilename();
-            $filePath = $file->getPathname();
 
-            if (str_contains($filePath, '/cache/')) {
+            if ($file->isDot() || !$file->isDir()) {
                 continue;
             }
 
-            $path = str_replace($fileName, '', $filePath);
+            $filePath = $file->getPathname();
 
-            if (is_dir($path)) {
-                $this->removeEmptyDirs($path);
+            if (str_contains($filePath, '/cache/') || $file->getFilename() === 'cache') {
+                continue;
             }
 
+            $this->removeEmptyDirs($filePath);
         }
 
         $iterator = new AppendIterator();
@@ -3002,8 +3095,16 @@ class PhenyxTool {
 
         }
 
-        mkdir(_EPH_ROOT_DIR_ . '/content/backoffice/backend/cache', 0777, true);
-        $this->generateIndexFiles(_EPH_ROOT_DIR_ . '/content/backoffice/backend/cache/');
+        // mkdir() sans garde : le dossier existe des le deuxieme passage, d'ou
+        // un « mkdir(): File exists » a chaque nettoyage. Le troisieme argument
+        // (recursif) ne dispense pas du test, contrairement a une idee repandue.
+        $cacheBo = _EPH_ROOT_DIR_ . '/content/backoffice/backend/cache';
+
+        if (!is_dir($cacheBo)) {
+            @mkdir($cacheBo, 0777, true);
+        }
+
+        $this->generateIndexFiles($cacheBo . '/');
 
     }
 
@@ -4801,31 +4902,90 @@ class PhenyxTool {
 
     }
 
+    /**
+     * Supprime les repertoires vides sous $path.
+     *
+     * Reecrite le 7 aout 2026. L'ancienne version listait avec glob(), qui
+     * IGNORE LES FICHIERS CACHES : un dossier ne contenant qu'un .htaccess ou
+     * un .gitkeep paraissait vide, et rmdir() echouait avec « Directory not
+     * empty » — d'ou les avertissements en masse dans les journaux Plesk sur
+     * includes/plugins/revolutpayment et includes/plugins/ph_paypal/log.
+     *
+     * Trois autres defauts corriges au passage :
+     *
+     *  - glob() rend false quand le repertoire est illisible, et empty(false)
+     *    vaut true : on tentait donc un rmdir() sur un dossier qu'on n'avait
+     *    meme pas pu ouvrir ;
+     *  - la recursion se faisait AVANT de tester le parent, mais le parent
+     *    n'etait jamais reteste ensuite : vider une arborescence profonde
+     *    demandait autant de passages que de niveaux ;
+     *  - le cas « il ne reste que index.php » supprimait le fichier PUIS
+     *    tentait le rmdir. Si celui-ci echouait — un fichier cache, justement —
+     *    le dossier restait en place SANS son garde-fou anti-listing. La
+     *    protection sautait sans que personne ne le voie.
+     *
+     * On liste desormais avec scandir(), on descend d'abord, et on ne
+     * supprime index.php qu'une fois certain que le dossier ne contient plus
+     * que lui.
+     *
+     * @param string $path Chemin, avec ou sans separateur final
+     *
+     * @return bool true si $path a ete supprime
+     */
     public function removeEmptyDirs($path) {
 
-        $dirs = glob($path . "*", GLOB_ONLYDIR);
+        $path = rtrim($path, '/\\');
 
-        foreach ($dirs as $dir) {
-            $files = glob($dir . "/*");
-            $innerDirs = glob($dir . "/*", GLOB_ONLYDIR);
+        if (!is_dir($path) || is_link($path)) {
+            return false;
+        }
 
-            if (is_array($files) && count($files) == 1 && basename($files[0]) == 'index.php') {
+        $entrees = @scandir($path);
 
-                unlink($files[0]);
-                rmdir($dir);
+        // Repertoire illisible : on ne touche a rien plutot que de supposer
+        // qu'il est vide.
+        if ($entrees === false) {
+            return false;
+        }
 
-            } else
+        $restant = [];
 
-            if (empty($files)) {
-                rmdir($dir);
-            } else
+        foreach ($entrees as $entree) {
 
-            if (is_array($innerDirs) && count($innerDirs) > 0) {
-                $this->removeEmptyDirs($dir . '/');
+            if ($entree === '.' || $entree === '..') {
+                continue;
+            }
+
+            $complet = $path . '/' . $entree;
+
+            // Descente d'abord : un sous-dossier vide disparait, et le parent
+            // devient supprimable dans le meme passage.
+            if (is_dir($complet) && !is_link($complet)) {
+
+                if ($this->removeEmptyDirs($complet)) {
+                    continue;
+                }
+
+            }
+
+            $restant[] = $entree;
+        }
+
+        // Il ne reste que le garde-fou anti-listing : on le retire, mais
+        // seulement maintenant qu'on sait qu'il est bien seul.
+        if (count($restant) === 1 && $restant[0] === 'index.php') {
+
+            if (@unlink($path . '/index.php')) {
+                $restant = [];
             }
 
         }
 
+        if (count($restant)) {
+            return false;
+        }
+
+        return @rmdir($path);
     }
 
     public function buildMaps() {

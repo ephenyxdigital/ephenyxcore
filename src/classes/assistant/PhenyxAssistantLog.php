@@ -111,7 +111,25 @@ class PhenyxAssistantLog extends PhenyxObjectModel {
         try {
             $log = new static();
             $log->id_employee = $query->idEmployee ?: null;
-            $log->controller_name = $query->controllerName;
+            /*
+             * ⚠️ L'ECRAN DE L'EMPLOYE, PAS LE NOTRE.
+             *
+             * $query->controllerName vaut « AdminAssistant » — le controleur
+             * qui traite la requete ajax. Journaliser cela remplissait la
+             * colonne d'une seule et meme valeur sur TOUTES les lignes, ce qui
+             * rendait inexploitable la question la plus utile qu'on puisse
+             * poser a ce journal : « depuis quels ecrans les employes
+             * demandent-ils de l'aide, et pour quoi ? ».
+             *
+             * Corrige le 2026-08-04, en meme temps que l'instantane de contexte
+             * de PhenyxAssistant::buildContextSnapshot().
+             *
+             * ⚠️ Les lignes deja ecrites gardent l'ancienne valeur : une
+             * statistique qui remonte avant cette date melange les deux.
+             */
+            $log->controller_name = !empty($query->extra['sourceController'])
+            ? (string) $query->extra['sourceController']
+            : $query->controllerName;
             $log->entity_class = $query->entityClass;
             $log->question = $query->text;
             $log->answer = $answer->text;

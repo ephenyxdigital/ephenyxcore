@@ -970,17 +970,60 @@ class PhenyxAssistant {
      */
     public function buildContextSnapshot(PhenyxAssistantQuery $query) {
 
+        /*
+         * ⚠️ LE CONTROLEUR DE L'INSTANTANE EST CELUI DE L'EMPLOYE, PAS LE NOTRE.
+         *
+         * $query->controllerName vient de PhenyxAssistantQuery::fromContext(),
+         * qui lit $context->controller — c'est-a-dire le controleur qui TRAITE
+         * la requete ajax, donc AdminAssistant lui-meme. Jamais l'ecran depuis
+         * lequel l'employe a pose sa question.
+         *
+         * Constate le 2026-08-04 sur la fiche utilisateur : le message de repli
+         * annoncait « aucune reponse pour "Visualiser ou modifier Jeff Hunger"
+         * sur l'ecran AdminAssistant » — un ecran ou l'employe n'a jamais mis
+         * les pieds. Le vrai controleur voyage pourtant depuis le navigateur
+         * dans extra['sourceController'] ; l'instantane l'ignorait.
+         *
+         * On prefere donc la source declaree, et on retombe sur le controleur
+         * courant seulement quand elle manque (appel serveur a serveur, par
+         * exemple). Meme regle pour le type d'ecran.
+         *
+         * ⚠️ Ce champ ne sert PAS a resoudre le topic — l'etage 0 lit
+         * extra['sourceController'] directement. Il sert au GROUNDING : le
+         * message de repli, l'onglet de menu associe (getBackTabInfo), et
+         * demain le prompt d'un LLM. Un contexte faux y est plus nuisible
+         * qu'un contexte absent : il raconte une histoire cohérente et fausse.
+         */
+        $nomControleur = !empty($query->extra['sourceController'])
+        ? (string) $query->extra['sourceController']
+        : $query->controllerName;
+
+        $typeControleur = !empty($query->extra['sourceType'])
+        ? (string) $query->extra['sourceType']
+        : $query->controllerType;
+
         $snapshot = [
             'controller' => [
-                'name'   => $query->controllerName,
-                'type'   => $query->controllerType,
+                'name'   => $nomControleur,
+                'type'   => $typeControleur,
                 'plugin' => $query->pluginName,
+                /*
+                 * Onglet courant (dataTab). Present pour le grounding, au meme
+                 * titre que le nom et le type : un repli qui sait sur quel
+                 * onglet se trouve l'employe peut le dire.
+                 */
+                'tab'    => isset($query->extra['sourceTab']) ? (string) $query->extra['sourceTab'] : null,
             ],
             'employee' => [
                 'id'         => $query->idEmployee,
                 'id_profile' => $query->idProfile,
             ],
-            'backTab' => $this->getBackTabInfo($query->controllerName),
+            /*
+             * Meme correction : l'onglet de menu a decrire est celui de
+             * l'ecran de l'employe, pas celui d'AdminAssistant — qui n'a
+             * d'ailleurs aucune entree de menu, d'ou un backTab vide.
+             */
+            'backTab' => $this->getBackTabInfo($nomControleur),
             'entity'  => null,
             'layers'  => $this->describeLayers(),
             // Renseigné uniquement si collectCandidates() a déjà tourné pour

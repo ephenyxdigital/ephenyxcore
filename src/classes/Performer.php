@@ -426,7 +426,7 @@ class Performer {
         if ($this->context->cache_enable) {
             $this->context->cache_api = CacheApi::getInstance();
         }
-
+		
         if (isset($_SERVER['REQUEST_URI'])) {
             $this->request_uri = $_SERVER['REQUEST_URI'];
         } elseif (isset($_SERVER['HTTP_X_REWRITE_URL'])) {
@@ -454,7 +454,7 @@ class Performer {
             }
 
         }
-		
+				
         // Fix #8: the route-lookup block was copy-pasted four times (full_back,
         // full_front, conventionnel/admin, conventionnel/front). Extracted into
         // resolveControllerFromRoutes() called once per mode branch.
@@ -711,14 +711,14 @@ class Performer {
     public function dispatch() {
 
         $controllerClass = '';
-
         if (!$this->controller) {
             $this->getController();
         }
-
+		
         if (!$this->controller) {
             $this->controller = $this->useDefaultController();
         }
+		
         switch ($this->front_controller) {
         case static::FC_FRONT:
             $this->controller = str_replace('-', '', $this->controller);

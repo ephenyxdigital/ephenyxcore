@@ -190,6 +190,17 @@ class TopMenuColumnWrap extends PhenyxObjectModel {
 
         return parent::delete();
     }
+	
+	public static function getCollectionColumnsWrap() {
+		
+        $wraps = Db::getInstance()->executeS(
+            (new DbQuery())
+                ->select('`id_topmenu_columns_wrap` as id_columns_wrap,  `internal_name`, `id_topmenu`')
+                ->from('topmenu_columns_wrap')
+        );
+		return $wraps;
+
+    }
 
     public static function getMenuColumnsWrap($id_topmenu, $id_lang, $active = true) {
 

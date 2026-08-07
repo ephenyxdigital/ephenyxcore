@@ -14,6 +14,13 @@ class PhenyxBackup {
 
     
     public static $backupDir = '/app/backup';
+
+    /**
+     * Derniere ligne d'un dump mene a son terme.
+     *
+     * Un fichier qui ne la porte pas est incomplet — voir le pied de add().
+     */
+    const COMPLETION_MARKER = 'PHENYX BACKUP COMPLETE';
     public $context;
     public $id;
     public $error;
@@ -175,6 +182,27 @@ class PhenyxBackup {
 
         $this->id = realpath($backupfile);
 
+        // ─── En-tete du dump ───
+        //
+        // Sans ces directives, une restauration echoue des qu'une CLE ETRANGERE
+        // relie deux tables : supprimer une table encore referencee est refuse,
+        // et l'ordre alphabetique dans lequel SHOW TABLES les rend n'a aucune
+        // raison de respecter les dependances.
+        //
+        // Constate le 2026-07-30 : une restauration s'est arretee net sur
+        // « DROP TABLE IF EXISTS eph_chat_department », ph_chatboxpro declarant
+        // des contraintes entre ses tables. Le message d'erreur etait vide, ce
+        // qui n'a rien arrange.
+        //
+        // mysqldump ecrit ces memes lignes systematiquement. Les porter DANS le
+        // dump plutot que de les poser a la restauration a un avantage decisif :
+        // le fichier devient restaurable par n'importe quel outil, « mysql »
+        // en ligne de commande compris.
+        fwrite($fp, "-- Sauvegarde Phenyx Digital\n");
+        fwrite($fp, '-- ' . date('Y-m-d H:i:s') . "\n\n");
+        fwrite($fp, "SET FOREIGN_KEY_CHECKS = 0;\n");
+        fwrite($fp, "SET SQL_MODE = 'NO_AUTO_VALUE_ON_ZERO';\n\n");
+
         // Find all tables
         $tables = Db::getInstance()->executeS('SHOW TABLES');
         $found = 0;
@@ -266,6 +294,17 @@ class PhenyxBackup {
             $found++;
         }
 
+        // ─── Pied du dump ───
+        //
+        // Retablit les contraintes, et sert de TEMOIN DE COMPLETION : un dump
+        // interrompu — expiration du script, disque plein, erreur fatale — ne
+        // porte pas cette ligne. C'est le seul moyen de distinguer une
+        // sauvegarde entiere d'un fichier tronque qui, sans elle, apparait dans
+        // la liste avec l'air d'une sauvegarde valide. Le pire defaut possible
+        // pour un filet de securite : croire qu'on en a un.
+        fwrite($fp, "\nSET FOREIGN_KEY_CHECKS = 1;\n");
+        fwrite($fp, '-- ' . self::COMPLETION_MARKER . "\n");
+
         fclose($fp);
 
         if ($found == 0) {
@@ -277,7 +316,7 @@ class PhenyxBackup {
 
         return true;
     }
-    
+
     public function generatePhenyxData() {
 
        $insertTable = [

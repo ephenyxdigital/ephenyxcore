@@ -322,6 +322,23 @@ class ParamGrid {
 			$this->dataModel['recIndx'] = '\'' . $this->recIndx . '\'';
 		}
 
+		// ⚠️ beforeSend — ajouté le 2026-08-07.
+		//
+		// pqGrid appelle `beforeSend` SANS garde dans callXHR :
+		//
+		//     beforeSend: o.beforeSend.bind(i)
+		//
+		// Quand la grille tourne en location:"remote", tout rafraichissement
+		// (refreshDataAndView, donc aussi le reloadGrid() declenche a chaque
+		// activation d'onglet dans nav.js) leve :
+		//
+		//     Uncaught TypeError: Cannot read properties of undefined (reading 'bind')
+		//
+		// et la grille reste bloquee sur « Chargement... ». Constate sur
+		// AdminPhenyxWiki ; le modele par defaut ci-dessous etant partage par tous
+		// les controleurs, la fonction vide est posee ici plutot que dans chaque
+		// appelant. Un controleur qui a besoin d'un vrai beforeSend continue de
+		// definir son propre $requestModel, qui prime.
 		if ($this->needRequestModel) {
 			$this->requestModel = (!empty($this->requestModel)) ? $this->requestModel : '{
             	location: "remote",
@@ -329,6 +346,7 @@ class ParamGrid {
             	method: "GET",
 				recIndx: "' . $this->paramIdentifier . '",
 				url: AjaxLink' . $this->paramController . ',
+				beforeSend: function () {},
 				postData: function () {
                 	return {
                     	action: "get' . $this->paramClass . 'Request",

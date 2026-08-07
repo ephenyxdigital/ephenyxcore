@@ -95,5 +95,5 @@ abstract class ComposerShortCodeAbstract {
 
 		return isset(self::$config[$name]) ? self::$config[$name] : null;
 	}
-
+	
 }

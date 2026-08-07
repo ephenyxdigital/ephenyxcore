@@ -44,6 +44,110 @@ class PhenyxTools {
 	/** @var string Dernière erreur SQL rencontrée par une fonction de maintenance (premier échec). */
 	public $lastError = '';
 
+	/**
+	 * La derniere operation a-t-elle ete SAUTEE plutot qu'executee ?
+	 *
+	 * cleanBackTabs() ne se relance pas si la derniere maintenance a moins de
+	 * 180 jours. Elle rendait alors true, et l'ecran annoncait « reconstruction
+	 * reussie » sans que rien n'ait eu lieu. L'appelant peut desormais faire la
+	 * difference.
+	 */
+	public $lastSkipped = false;
+
+	/**
+	 * Information a remonter a l'ecran quand l'operation s'est deroulee mais
+	 * qu'une de ses etapes a ete volontairement annulee.
+	 *
+	 * Le cas type : la garde anti-catastrophe de cleanMetas(), qui renonce a
+	 * purger quand la liste des pages legitimes semble tronquee. Sans ce canal,
+	 * l'annulation n'apparaissait que dans le journal et l'ecran annoncait un
+	 * succes complet.
+	 */
+	public $lastNotice = '';
+
+	/**
+	 * Mode simulation : rien n'est ecrit, tout est consigne.
+	 *
+	 * Les LECTURES s'executent normalement — c'est ce qui rend l'analyse exacte :
+	 * les memes SELECT, les memes decomptes, les memes decisions. Seules les
+	 * ecritures sont interceptees. Voir runSql() et plan().
+	 *
+	 * Mis en place le 2026-07-30, apres qu'une reconstruction des metas a
+	 * impose une restauration de la base : il manquait simplement un moyen de
+	 * savoir ce qu'une operation allait faire AVANT de la subir.
+	 */
+	public $dryRun = false;
+
+	/**
+	 * Autoriser la SUPPRESSION d'onglets pendant cleanBackTabs() ?
+	 *
+	 * Faux par defaut depuis le 2026-07-30. Le critere de suppression — « pas de
+	 * classe de controleur » — s'est revele faux pour toute une famille
+	 * d'onglets, et une suppression ne se repare que par restauration. L'etape
+	 * se contente donc de SIGNALER les candidats ; la renumerotation, elle, se
+	 * fait normalement.
+	 *
+	 * Passer a true en connaissance de cause, apres avoir lu le rapport de
+	 * simulation.
+	 */
+	public $allowTabDeletion = false;
+
+	/** @var array Ecritures qui auraient eu lieu, en mode simulation. */
+	public $plan = [];
+
+	/**
+	 * Consigne une action qui ne passe pas par runSql() — suppression d'objet,
+	 * reinitialisation de plugin, reecriture de fichier.
+	 *
+	 * @param string $table Table ou domaine concerne
+	 * @param string $op    Nature de l'action
+	 * @param string $note  Detail lisible
+	 *
+	 * @return void
+	 */
+	public function plan($table, $op, $note = '') {
+
+		$this->plan[] = [
+			'table' => $table,
+			'op'    => $op,
+			'note'  => $note,
+		];
+	}
+
+	/**
+	 * Compte-rendu lisible de ce qu'une simulation aurait fait.
+	 *
+	 * @return array{total: int, lines: array<int,string>}
+	 */
+	public function planSummary() {
+
+		$counts = [];
+
+		foreach ($this->plan as $entry) {
+			$key = $entry['op'] . ' ' . $entry['table'];
+			$counts[$key] = isset($counts[$key]) ? $counts[$key] + 1 : 1;
+		}
+
+		ksort($counts);
+		$lines = [];
+
+		foreach ($counts as $key => $n) {
+			$lines[] = $n . ' × ' . $key;
+		}
+
+		// Les notes portent l'information que le decompte ne dit pas : quelles
+		// metas exactement, quels plugins reinitialises.
+		foreach ($this->plan as $entry) {
+
+			if ($entry['note'] !== '') {
+				$lines[] = '— ' . $entry['note'];
+			}
+
+		}
+
+		return ['total' => count($this->plan), 'lines' => $lines];
+	}
+
 	public function __construct() {
 
 		$this->context = Context::getContext();
@@ -784,7 +888,218 @@ class PhenyxTools {
 	 * Exécute une requête et mémorise le 1er échec (message SQL + requête) dans
 	 * $this->lastError. Retourne le booléen de succès (sans accumuler).
 	 */
+	/** @var int Profondeur d'imbrication des transactions. */
+	protected $txDepth = 0;
+
+	/** @var bool Le .htaccess doit-il etre reecrit apres validation ? */
+	protected $htaccessPending = false;
+
+	/**
+	 * Execute une operation de maintenance dans une transaction.
+	 *
+	 * ─── POURQUOI C'EST DEVENU POSSIBLE ───
+	 *
+	 * Ces methodes retiraient l'auto-increment et la cle primaire avant de
+	 * renumeroter, puis les remettaient. C'etait inutile sur les deux plans :
+	 *
+	 *  - l'AUTO_INCREMENT ne concerne que les INSERT, il n'a jamais empeche de
+	 *    mettre a jour la colonne ;
+	 *  - la CLE PRIMAIRE n'exige que l'unicite, et l'astuce du decalage — tout
+	 *    deplacer au-dela du plus grand identifiant avant de redescendre a
+	 *    1..n — la garantit a chaque instant. cleanHook s'en passe meme
+	 *    naturellement : en parcourant par identifiant croissant et en
+	 *    assignant 1, 2, 3..., la cible est toujours inferieure ou egale a la
+	 *    valeur courante, donc deja liberee.
+	 *
+	 * Et c'etait surtout NUISIBLE : en MySQL, tout ALTER TABLE valide
+	 * implicitement la transaction en cours. Tant qu'ils etaient la, aucune
+	 * protection n'etait possible — une interruption laissait la table a moitie
+	 * renumerotee, parfois sans cle primaire, sans reprise possible. C'est ce
+	 * qui a impose deux restaurations le 2026-07-30.
+	 *
+	 * Les vingt-huit manipulations de schema ont donc ete retirees. Les
+	 * operations sont desormais purement transactionnelles.
+	 *
+	 * ⚠️ Cela suppose des tables InnoDB. Sur une table MyISAM, la transaction
+	 * est silencieusement sans effet — le comportement est alors celui d'avant,
+	 * ni meilleur ni pire.
+	 *
+	 * @param string   $label Nom de l'operation, pour le journal
+	 * @param callable $work  Le corps de l'operation ; rend un booleen
+	 *
+	 * @return bool
+	 */
+	public function transactional($label, callable $work, ?array $renumbered = null) {
+
+		$renumbered = $renumbered ?: [];
+
+		// En simulation rien n'est ecrit : une transaction n'aurait pas d'objet.
+		if ($this->dryRun) {
+			$ok = (bool) $work();
+
+			foreach ($renumbered as $table => $column) {
+				$this->plan($table, 'RECALAGE AUTO_INCREMENT');
+			}
+
+			return $ok;
+		}
+
+		$this->beginTx();
+
+		try {
+			$ok = (bool) $work();
+		} catch (\Throwable $e) {
+			$this->rollbackTx();
+			$this->lastError = $label . ' : ' . $e->getMessage();
+			PhenyxLogger::addLog('PhenyxTools::' . $label . ' — annulee, rien n\'a ete modifie : ' . $e->getMessage(), 3);
+
+			return false;
+		}
+
+		if (!$ok) {
+			$this->rollbackTx();
+			PhenyxLogger::addLog('PhenyxTools::' . $label . ' — annulee, rien n\'a ete modifie. ' . $this->lastError, 3);
+
+			return false;
+		}
+
+		$this->commitTx();
+
+		// ─── Recalage du compteur d'auto-increment, APRES validation ───
+		//
+		// La renumerotation rend les identifiants contigus de 1 a n, mais le
+		// compteur de la table reste sur son ancien plafond : la prochaine
+		// insertion repartirait tres au-dessus, et le rangement n'aurait servi
+		// qu'a moitie.
+		//
+		// L'ancien code obtenait ce recalage par effet de bord — reattribuer
+		// AUTO_INCREMENT a une colonne fait repartir le compteur a MAX(id)+1.
+		// En retirant ces ALTER pour rendre les operations transactionnelles,
+		// j'avais supprime le recalage avec. On le refait donc explicitement,
+		// et HORS transaction puisque c'est du DDL.
+		foreach ($renumbered as $table => $column) {
+			$this->syncAutoIncrement($table, $column);
+		}
+
+		return true;
+	}
+
+	/**
+	 * Recale le compteur d'auto-increment sur MAX(id) + 1.
+	 *
+	 * A n'appeler qu'en dehors d'une transaction : c'est du DDL, donc un COMMIT
+	 * implicite en MySQL.
+	 *
+	 * @param string $table  Sans le prefixe
+	 * @param string $column Colonne portant l'auto-increment
+	 *
+	 * @return bool
+	 */
+	public function syncAutoIncrement($table, $column) {
+
+		if ($this->dryRun) {
+			return true;
+		}
+
+		try {
+			$next = (int) Db::getInstance()->getValue(
+				'SELECT IFNULL(MAX(`' . bqSQL($column) . '`), 0) + 1 FROM `' . _DB_PREFIX_ . bqSQL($table) . '`'
+			);
+
+			if ($next < 1) {
+				$next = 1;
+			}
+
+			return (bool) Db::getInstance()->execute(
+				'ALTER TABLE `' . _DB_PREFIX_ . bqSQL($table) . '` AUTO_INCREMENT = ' . $next
+			);
+		} catch (\Throwable $e) {
+			// Sans gravite : les insertions continueront simplement au-dessus de
+			// l'ancien plafond. On le signale sans faire echouer l'operation,
+			// qui est deja validee.
+			PhenyxLogger::addLog(
+				'PhenyxTools::syncAutoIncrement(' . $table . ') a échoué : ' . $e->getMessage(),
+				2
+			);
+
+			return false;
+		}
+
+	}
+
+	/**
+	 * @return bool
+	 */
+	public function beginTx() {
+
+		if ($this->dryRun) {
+			return true;
+		}
+
+		if ($this->txDepth++ > 0) {
+			return true;
+		}
+
+		return (bool) Db::getInstance()->execute('START TRANSACTION');
+	}
+
+	/**
+	 * @return bool
+	 */
+	public function commitTx() {
+
+		if ($this->dryRun) {
+			return true;
+		}
+
+		if (--$this->txDepth > 0) {
+			return true;
+		}
+
+		$this->txDepth = 0;
+
+		return (bool) Db::getInstance()->execute('COMMIT');
+	}
+
+	/**
+	 * @return bool
+	 */
+	public function rollbackTx() {
+
+		if ($this->dryRun) {
+			return true;
+		}
+
+		$this->txDepth = 0;
+
+		return (bool) Db::getInstance()->execute('ROLLBACK');
+	}
+
 	public function runSql($sql) {
+
+		// ─── Mode simulation ───
+		//
+		// On intercepte ici, au point de passage unique de toutes les ecritures.
+		// Les lectures n'empruntent pas ce chemin (elles vont directement a
+		// Db::getInstance()->executeS/getValue), donc l'analyse reste exacte :
+		// memes decomptes, memes decisions, aucune ecriture.
+		if ($this->dryRun) {
+			$table = '?';
+
+			if (preg_match('/(?:FROM|INTO|UPDATE|TABLE)\s+`?' . preg_quote(_DB_PREFIX_, '/') . '?([a-z_]+)`?/i', $sql, $m)) {
+				$table = $m[1];
+			}
+
+			$op = 'REQUETE';
+
+			if (preg_match('/^\s*(DELETE|UPDATE|INSERT|ALTER|TRUNCATE|DROP)/i', $sql, $m)) {
+				$op = strtoupper($m[1]);
+			}
+
+			$this->plan($table, $op);
+
+			return true;
+		}
 
 		$ok = (bool) Db::getInstance()->execute($sql);
 
@@ -817,7 +1132,18 @@ class PhenyxTools {
 		return (int) $count > 0;
 	}
 
+	/**
+	 * Enveloppe transactionnelle — le corps est dans cleanBackTabsWork().
+	 * Voir transactional() pour le raisonnement.
+	 */
 	public function cleanBackTabs() {
+
+		return $this->transactional('cleanBackTabs', function () {
+			return $this->cleanBackTabsWork();
+		}, ['back_tab' => 'id_back_tab']);
+	}
+
+	protected function cleanBackTabsWork() {
 
 		$today = date("Y-m-d");
 		$date = new DateTime($today);
@@ -826,11 +1152,38 @@ class PhenyxTools {
 		$last_maintenance = $this->context->phenyxConfig->get('BACK_TAB_MAINTENANCE');
 
 		if (!is_null($last_maintenance) && $last_maintenance > $dateCheck) {
+			// On rend true, mais on le SIGNALE : sans cela l'ecran annonce
+			// « reconstruction reussie » alors qu'absolument rien n'a ete fait,
+			// et l'employe croit avoir agi.
+			$this->lastSkipped = true;
+
 			return true;
 		}
 
 		$this->lastError = '';
+		$this->lastSkipped = false;
 		$result = true;
+
+		// ⚠️ L'etape 1 supprime un onglet quand class_exists() ne trouve pas son
+		// controleur. Or l'index des classes ne se regenere QUE si le fichier
+		// indexe a disparu : un index perime fait donc croire a l'absence d'une
+		// classe bien presente, et l'onglet — plus sa meta — est supprime a tort.
+		//
+		// ⚠️ Supprimer le FICHIER ne suffit pas : PhenyxAutoload le charge une
+		// seule fois, dans son constructeur, et garde l'index en memoire pour
+		// toute la requete. Un unlink n'aurait donc aucun effet sur les
+		// class_exists() qui suivent. Il faut demander la reconstruction, qui
+		// reassigne l'index en memoire ET reecrit le fichier.
+		try {
+			PhenyxAutoload::getInstance()->generateIndex();
+		} catch (\Throwable $e) {
+			// Index non reconstruit : on renonce a l'etape de suppression
+			// plutot que de juger sur une information peut-etre fausse.
+			$this->lastError = 'Index des classes non reconstruit, suppression des onglets ignoree : ' . $e->getMessage();
+			PhenyxLogger::addLog('PhenyxTools::cleanBackTabs — ' . $this->lastError, 3);
+
+			$skipTabDeletion = true;
+		}
 
 		// ── 1) Suppression des onglets obsolètes — version SÉCURISÉE.
 		//    On ne supprime QUE les onglets : sans plugin associé, sans enfants,
@@ -838,9 +1191,14 @@ class PhenyxTools {
 		//    est introuvable. Évite de détruire les onglets de plugins (dont la
 		//    classe peut ne pas être chargée pendant la maintenance) et les
 		//    nœuds parents du menu.
-		$tabClasses = Db::getInstance()->executeS(
-			'SELECT `id_back_tab`, `class_name`, `plugin` FROM `' . _DB_PREFIX_ . 'back_tab` ORDER BY `id_back_tab` ASC'
-		);
+		$tabClasses = empty($skipTabDeletion)
+		? Db::getInstance()->executeS(
+			'SELECT `id_back_tab`, `class_name`, `plugin`, `id_parent` FROM `' . _DB_PREFIX_ . 'back_tab` ORDER BY `id_back_tab` ASC'
+		)
+		: [];
+
+		$hasAccessTable = $this->tableExists('employee_access');
+		$candidates = [];
 
 		foreach ($tabClasses as $tablasse) {
 
@@ -856,6 +1214,33 @@ class PhenyxTools {
 				continue;
 			}
 
+			// ⚠️ ONGLET CACHE — ne jamais supprimer.
+			//
+			// Un onglet monte avec id_parent negatif n'apparait pas dans le menu :
+			// il sert de point d'accroche aux PERMISSIONS et de cible aux appels
+			// ajax. L'absence de classe de controleur ne prouve donc rien a son
+			// sujet, alors que le critere ci-dessus le condamne.
+			//
+			// Constate le 2026-07-30 : AdminAdminConfigurationPanel,
+			// AdminRebuildTabs, AdminFlushApi, AdminFlushSession et AdminFlushFull
+			// — les actions de l'ecran Performance — ont ete supprimes ainsi.
+			if ((int) $tablasse['id_parent'] < 0) {
+				continue;
+			}
+
+			// Des permissions pointent vers cet onglet : quelqu'un s'appuie
+			// dessus, quoi qu'en dise l'absence de controleur.
+			if ($hasAccessTable) {
+				$used = (int) Db::getInstance()->getValue(
+					'SELECT COUNT(*) FROM `' . _DB_PREFIX_ . 'employee_access` WHERE `id_back_tab` = ' . (int) $tablasse['id_back_tab']
+				);
+
+				if ($used > 0) {
+					continue;
+				}
+
+			}
+
 			$hasChildren = (int) Db::getInstance()->getValue(
 				(new DbQuery())
 					->select('COUNT(*)')
@@ -867,15 +1252,45 @@ class PhenyxTools {
 				continue;
 			}
 
+			$id_meta = Meta::getIdMetaByPage(strtolower($tablasse['class_name']));
+
+			// Ces suppressions passent par les objets, pas par runSql() : il faut
+			// les consigner explicitement en simulation.
+			if ($this->dryRun) {
+				$this->plan('back_tab', 'SUPPRESSION', 'Onglet « ' . $tablasse['class_name'] .' » (contrôleur introuvable)');
+
+				if ($id_meta > 0) {
+					$this->plan('meta', 'SUPPRESSION', 'Méta de « ' . $tablasse['class_name'] . ' »');
+				}
+
+				continue;
+			}
+
+			// Suppression desactivee par defaut : on signale, on ne detruit pas.
+			if (!$this->allowTabDeletion) {
+				$candidates[] = $tablasse['class_name'];
+				continue;
+			}
+
 			$bckTab = new BackTab($tablasse['id_back_tab']);
 			$bckTab->delete();
-			$id_meta = Meta::getIdMetaByPage(strtolower($tablasse['class_name']));
 
 			if ($id_meta > 0) {
 				$meta = new Meta($id_meta);
 				$meta->delete();
 			}
 
+		}
+
+		if (!empty($candidates)) {
+			// Signale sans detruire : la suppression ne se repare que par
+			// restauration, et le critere s'est deja trompe.
+			$this->lastNotice = sprintf(
+				'%1$d onglet(s) sans contrôleur repéré(s), non supprimé(s) : %2$s. Vérifiez avant d\'autoriser leur suppression.',
+				count($candidates),
+				implode(', ', $candidates)
+			);
+			PhenyxLogger::addLog('cleanBackTabs — onglets sans contrôleur, conservés : ' . implode(', ', $candidates), 1);
 		}
 
 		// ── 2) Renumérotation contiguë des id_back_tab EN PRÉSERVANT la hiérarchie.
@@ -907,14 +1322,28 @@ class PhenyxTools {
 		$hasAccess = $this->tableExists('employee_access');
 
 		// Retrait de l'AUTO_INCREMENT pour réassigner librement (la PK reste).
-		$this->exec('ALTER TABLE `' . _DB_PREFIX_ . 'back_tab` CHANGE `id_back_tab` `id_back_tab` INT(10) UNSIGNED NOT NULL', $result);
 
 		// Phase A : tout vers (new_id + offset) ; id_parent remappé identiquement.
 		foreach ($rows as $row) {
 			$oldId = (int) $row['id_back_tab'];
 			$oldParent = (int) $row['id_parent'];
 			$tmpId = $map[$oldId] + $offset;
-			$tmpParent = ($oldParent > 0 && isset($map[$oldParent])) ? ($map[$oldParent] + $offset) : $oldParent;
+
+			// Orphelin : id_parent designe un onglet qui n'existe plus. L'ancienne
+			// ecriture conservait la valeur telle quelle — apres renumerotation,
+			// cette valeur designe un AUTRE onglet, et l'orphelin reapparait sous
+			// un parent sans rapport. On le remonte a la racine : visible, donc
+			// corrigeable, plutot que discretement mal range.
+			if ($oldParent > 0 && !isset($map[$oldParent])) {
+				PhenyxLogger::addLog(
+					'PhenyxTools::cleanBackTabs — onglet ' . $oldId . ' rattache a un parent inexistant ('
+					. $oldParent . '), remonte a la racine.',
+					2
+				);
+				$oldParent = 0;
+			}
+
+			$tmpParent = ($oldParent > 0) ? ($map[$oldParent] + $offset) : $oldParent;
 
 			$this->exec('UPDATE `' . _DB_PREFIX_ . 'back_tab` SET `id_back_tab` = ' . $tmpId . ', `id_parent` = ' . $tmpParent . ' WHERE `id_back_tab` = ' . $oldId, $result);
 			$this->exec('UPDATE `' . _DB_PREFIX_ . 'back_tab_lang` SET `id_back_tab` = ' . $tmpId . ' WHERE `id_back_tab` = ' . $oldId, $result);
@@ -934,7 +1363,6 @@ class PhenyxTools {
 		}
 
 		// Remise de l'AUTO_INCREMENT (la PK est intacte).
-		$this->exec('ALTER TABLE `' . _DB_PREFIX_ . 'back_tab` CHANGE `id_back_tab` `id_back_tab` INT(10) UNSIGNED NOT NULL AUTO_INCREMENT', $result);
 
 		if ($result && $this->context->cache_enable && is_object($this->context->cache_api)) {
 			$this->context->cache_api->cleanByStartingKey('generateTabs_');
@@ -942,7 +1370,11 @@ class PhenyxTools {
 		}
 
 		if ($result) {
-			$this->context->phenyxConfig->updateValue('BACK_TAB_MAINTENANCE', date("Y-m-d"));
+			// En simulation on n'horodate pas : sinon l'analyse ferait croire
+			// a une maintenance faite, et l'execution reelle serait sautee.
+			if (!$this->dryRun) {
+				$this->context->phenyxConfig->updateValue('BACK_TAB_MAINTENANCE', date("Y-m-d"));
+			}
 		}
 
 		return $result;
@@ -990,21 +1422,64 @@ class PhenyxTools {
 			_EPH_CORE_DIR_ . '/includes/specific_controllers/',
 		];
 
+		// ⚠️ Tools::scandir() rend des chemins RELATIFS au repertoire de depart
+		// (« admin/AdminFooController.php »). basename() s'en accommode, mais
+		// toute lecture du fichier exige le chemin complet. On absolutise donc
+		// des la collecte.
 		foreach ($coreDirs as $dir) {
 
 			if (is_dir($dir)) {
-				$scan = array_merge($scan, (array) Tools::scandir($dir, 'php', '', true));
+
+				foreach ((array) Tools::scandir($dir, 'php', '', true) as $rel) {
+					$scan[] = rtrim($dir, '/') . '/' . $rel;
+				}
+
 			}
 
 		}
 
+		// ⚠️ Le scan portait sur la RACINE de chaque plugin, en recursif. Sur une
+		// installation fournie cela represente plus de six mille fichiers PHP
+		// repartis dans plus de deux mille repertoires — vues, traductions,
+		// bibliotheques embarquees — pour n'en retenir qu'une poignee de
+		// *Controller.php. Le cout etait tel que la requete pouvait expirer sans
+		// rendre la moindre reponse.
+		//
+		// Les controleurs d'un plugin vivent toujours dans l'un de ces deux
+		// emplacements. On ne parcourt plus qu'eux.
 		foreach (Plugin::getPluginsInstalled() as $plugin) {
 
 			foreach ([_EPH_PLUGIN_DIR_, _EPH_SPECIFIC_PLUGIN_DIR_] as $base) {
-				$dir = $base . $plugin['name'];
+				$root = $base . $plugin['name'];
 
-				if (is_dir($dir)) {
-					$scan = array_merge($scan, (array) Tools::scandir($dir, 'php', '', true));
+				if (!is_dir($root)) {
+					continue;
+				}
+
+				$dirs = [$root . '/controllers/'];
+
+				// classes/controller/ — mais pas seulement : ph_wiki porte un
+				// « classes/controlller/ » avec trois L. Un chemin fige aurait
+				// exclu ce controleur de la liste des pages valides, rendant sa
+				// meta supprimable. On accepte donc toute variante.
+				foreach ((array) @glob($root . '/classes/*', GLOB_ONLYDIR) as $sub) {
+
+					if (stripos(basename($sub), 'controll') === 0) {
+						$dirs[] = $sub . '/';
+					}
+
+				}
+
+				foreach ($dirs as $dir) {
+
+					if (is_dir($dir)) {
+
+						foreach ((array) Tools::scandir($dir, 'php', '', true) as $rel) {
+							$scan[] = rtrim($dir, '/') . '/' . $rel;
+						}
+
+					}
+
 				}
 
 			}
@@ -1026,13 +1501,50 @@ class PhenyxTools {
 			}
 
 			$controllers[] = strtolower($name);
+
+			// ⚠️ LE NOM DU FICHIER NE SUFFIT PAS.
+			//
+			// La colonne meta.page stocke le php_self du controleur, PAS son nom
+			// de fichier. Les deux coincident presque toujours — mais pas
+			// toujours :
+			//
+			//   AuthController.php          -> php_self 'authentication'
+			//   MyAccountController.php     -> php_self 'my-account'
+			//   PfgModelController.php      -> php_self 'pfg-model'
+			//   AdminGsiteMapsController.php-> php_self 'admingsitemap'
+			//
+			// Le repli par nom de fichier declarait donc « authentication »
+			// illegitime, et sa meta partait a la suppression — avec, dans la
+			// foulee, la regle de reecriture correspondante dans le .htaccess.
+			// C'est ce qui a casse le site le 2026-07-30.
+			//
+			// On lit donc le php_self a la source. Une simple expression
+			// reguliere suffit : ni chargement de classe, ni Reflection, donc
+			// utilisable en contexte de maintenance.
+			$src = @file_get_contents($file);
+
+			if ($src !== false && preg_match('/\$php_self\s*=\s*[\'"]([^\'"]+)[\'"]/', $src, $m)) {
+				$controllers[] = strtolower($m[1]);
+			}
+
 		}
 
 		return array_values(array_unique(array_filter($controllers)));
 
 	}
 
+	/**
+	 * Enveloppe transactionnelle — le corps est dans cleanGuestWork().
+	 * Voir transactional() pour le raisonnement.
+	 */
 	public function cleanGuest() {
+
+		return $this->transactional('cleanGuest', function () {
+			return $this->cleanGuestWork();
+		}, ['guest' => 'id_guest']);
+	}
+
+	protected function cleanGuestWork() {
 
 		$query = 'SELECT id_guest  FROM `' . _DB_PREFIX_ . 'guest` WHERE id_user = 0';
 
@@ -1045,8 +1557,6 @@ class PhenyxTools {
 
 		$result = true;
 
-		$result &= $this->removeAutoIncrement('guest', 'id_guest');
-		$result &= $this->dropPrimaryKeyIfExists('guest');
 
 		$query = 'SELECT id_guest  FROM `' . _DB_PREFIX_ . 'guest` ORDER BY id_guest ASC';
 
@@ -1085,18 +1595,31 @@ class PhenyxTools {
 			$i++;
 		}
 
-		$result &= $this->addPrimaryKeyIfMissing('guest', '`id_guest`');
-		$result &= $this->setAutoIncrement('guest', 'id_guest');
 
 		if ($result) {
-			$this->context->phenyxConfig->updateValue('GUEST_MAINTENANCE', date("Y-m-d"));
+			// En simulation on n'horodate pas : sinon l'analyse ferait croire
+			// a une maintenance faite, et l'execution reelle serait sautee.
+			if (!$this->dryRun) {
+				$this->context->phenyxConfig->updateValue('GUEST_MAINTENANCE', date("Y-m-d"));
+			}
 		}
 
 		return $result;
 
 	}
 
+	/**
+	 * Enveloppe transactionnelle — le corps est dans cleanConfigurationWork().
+	 * Voir transactional() pour le raisonnement.
+	 */
 	public function cleanConfiguration() {
+
+		return $this->transactional('cleanConfiguration', function () {
+			return $this->cleanConfigurationWork();
+		}, ['configuration' => 'id_configuration']);
+	}
+
+	protected function cleanConfigurationWork() {
 
 		// $result doit être initialisé AVANT la première boucle : elle fait
 		// déjà $result &= ... (suppression des configuration_lang orphelins).
@@ -1123,8 +1646,6 @@ class PhenyxTools {
 
 		}
 
-		$result &= $this->removeAutoIncrement('configuration', 'id_configuration');
-		$result &= $this->dropPrimaryKeyIfExists('configuration');
 
 		$query = 'SELECT id_configuration  FROM `' . _DB_PREFIX_ . 'configuration` ORDER BY id_configuration ASC';
 
@@ -1158,20 +1679,51 @@ class PhenyxTools {
 			$i++;
 		}
 
-		$result &= $this->addPrimaryKeyIfMissing('configuration', '`id_configuration`');
-		$result &= $this->setAutoIncrement('configuration', 'id_configuration');
 
 		if ($result) {
-			$this->context->phenyxConfig->updateValue('CONFIGURATION_MAINTENANCE', date("Y-m-d"));
+			// En simulation on n'horodate pas : sinon l'analyse ferait croire
+			// a une maintenance faite, et l'execution reelle serait sautee.
+			if (!$this->dryRun) {
+				$this->context->phenyxConfig->updateValue('CONFIGURATION_MAINTENANCE', date("Y-m-d"));
+			}
 		}
 
 		return $result;
 
 	}
 
+	/**
+	 * Enveloppe transactionnelle — le corps est dans cleanMetasWork().
+	 * Voir transactional() pour le raisonnement.
+	 */
 	public function cleanMetas() {
 
+		$this->htaccessPending = false;
+
+		$ok = $this->transactional('cleanMetas', function () {
+			return $this->cleanMetasWork();
+		}, ['meta' => 'id_meta', 'theme_meta' => 'id_theme_meta']);
+
+		// Apres validation seulement : le .htaccess porte les regles de
+		// reecriture derivees des metas, il ne doit refleter que ce qui a
+		// reellement ete enregistre.
+		if ($ok && $this->htaccessPending && !$this->dryRun) {
+
+			try {
+				Tools::generateHtaccess();
+			} catch (\Throwable $e) {
+				PhenyxLogger::addLog('cleanMetas — régénération du .htaccess impossible : ' . $e->getMessage(), 3);
+			}
+
+		}
+
+		return $ok;
+	}
+
+	protected function cleanMetasWork() {
+
 		$result = true;
+		$this->lastNotice = '';
 
 		$legitimeMetas = $this->getLegitimeMeta();
 		$idLang = $this->context->language->id;
@@ -1209,12 +1761,68 @@ class PhenyxTools {
 
 		if ($total > 0 && count($toDelete) > ($total / 2)) {
 			PhenyxLogger::addLog('cleanMetas : purge annulée par sécurité — ' . count($toDelete) . '/' . $total . ' métas auraient été supprimées (liste des pages légitimes probablement tronquée car classes non chargées).', 3);
+
+			// L'annulation ne doit pas rester confinee au journal : l'ecran
+			// annoncait « reconstruction reussie » sans mentionner que l'etape
+			// principale avait ete abandonnee.
+			$this->lastNotice = sprintf(
+				'Purge annulée par sécurité : %1$d métas sur %2$d auraient été supprimées, la liste des pages valides semble incomplète. Le rangement a bien eu lieu, aucune méta n\'a été supprimée.',
+				count($toDelete),
+				$total
+			);
+
 			$toDelete = [];
 		}
 
-		foreach ($toDelete as $idMeta) {
-			$obj = new Meta($idMeta);
-			$obj->delete();
+		// ⚠️ Ici se trouvait « new Meta($id); $obj->delete(); » dans une boucle.
+		//
+		// Meta::delete() se termine par Tools::generateHtaccess(), une fonction
+		// de plus de trois cents lignes qui REECRIT INTEGRALEMENT le .htaccess.
+		// Supprimer cinquante metas declenchait donc cinquante reecritures
+		// completes du fichier. Deux consequences, toutes deux constatees le
+		// 2026-07-30 : la requete expirait sans rendre de reponse, et une mort
+		// en pleine ecriture laissait un .htaccess TRONQUE — donc un routage
+		// casse.
+		//
+		// On supprime desormais en une seule requete par table, et on ne
+		// regenere le .htaccess qu'une fois, a la fin.
+		if (!empty($toDelete) && $this->dryRun) {
+
+			// En simulation on nomme les metas visees : un decompte ne dit pas
+			// si la liste est raisonnable, la liste des pages le dit.
+			foreach ($metas as $meta) {
+
+				if (in_array((int) $meta['id_meta'], $toDelete, true)) {
+					$this->plan('meta', 'SUPPRESSION', 'Méta « ' . $meta['page'] . ' »');
+				}
+
+			}
+
+			$toDelete = [];
+		}
+
+		if (!empty($toDelete)) {
+			$ids = implode(',', array_map('intval', $toDelete));
+
+			// meta_lang et theme_meta sont retires explicitement : le nettoyage
+			// des orphelins qui suit ne couvre que la langue courante.
+			$this->exec('DELETE FROM `' . _DB_PREFIX_ . 'meta_lang` WHERE `id_meta` IN (' . $ids . ')', $result);
+			$this->exec('DELETE FROM `' . _DB_PREFIX_ . 'theme_meta` WHERE `id_meta` IN (' . $ids . ')', $result);
+			$this->exec('DELETE FROM `' . _DB_PREFIX_ . 'meta` WHERE `id_meta` IN (' . $ids . ')', $result);
+
+			// ⚠️ La reecriture du .htaccess est DIFFEREE apres la validation.
+			//
+			// C'est une ecriture de FICHIER : elle ne s'annule pas. Faite ici,
+			// a l'interieur de la transaction, elle survivrait a un retour
+			// arriere — le fichier refleterait des suppressions que la base
+			// n'aurait pas enregistrees, et la page perdrait sa regle de
+			// reecriture pour rien. Voir cleanMetas().
+			$this->htaccessPending = true;
+
+			if ($this->dryRun) {
+				$this->plan('.htaccess', 'REECRITURE');
+			}
+
 		}
 
 		$query = 'SELECT id_meta  FROM `' . _DB_PREFIX_ . 'theme_meta` ORDER BY id_meta ASC';
@@ -1294,10 +1902,7 @@ class PhenyxTools {
 				->from('meta')
 		);
 
-		$result &= $this->removeAutoIncrement('meta', 'id_meta');
-		$result &= $this->dropPrimaryKeyIfExists('meta');
 		$result &= $this->dropIndexIfExists('meta', 'page');
-		$result &= $this->dropPrimaryKeyIfExists('meta_lang');
 		$result &= $this->dropIndexIfExists('meta_lang', 'id_lang');
 
 		foreach ($metas as $meta) {
@@ -1332,10 +1937,7 @@ class PhenyxTools {
 		}
 
 		// PK d'abord, PUIS AUTO_INCREMENT (une colonne auto_increment doit être indexée).
-		$result &= $this->addPrimaryKeyIfMissing('meta', '`id_meta`');
-		$result &= $this->setAutoIncrement('meta', 'id_meta');
 		$result &= $this->addIndexIfMissing('meta', 'page', '`page`', true);
-		$result &= $this->addPrimaryKeyIfMissing('meta_lang', '`id_meta`, `id_lang`');
 		$result &= $this->addIndexIfMissing('meta_lang', 'id_lang', '`id_lang`');
 		$result &= $this->addIndexIfMissing('theme_meta', 'id_theme_2', '`id_theme`, `id_meta`', true);
 		$result &= $this->addIndexIfMissing('theme_meta', 'id_theme', '`id_theme`');
@@ -1346,14 +1948,29 @@ class PhenyxTools {
 		}
 
 		if ($result) {
-			$this->context->phenyxConfig->updateValue('META_MAINTENANCE', date("Y-m-d"));
+			// En simulation on n'horodate pas : sinon l'analyse ferait croire
+			// a une maintenance faite, et l'execution reelle serait sautee.
+			if (!$this->dryRun) {
+				$this->context->phenyxConfig->updateValue('META_MAINTENANCE', date("Y-m-d"));
+			}
 		}
 
 		return $result;
 
 	}
 
+	/**
+	 * Enveloppe transactionnelle — le corps est dans cleanPluginHookWork().
+	 * Voir transactional() pour le raisonnement.
+	 */
 	public function cleanPluginHook() {
+
+		return $this->transactional('cleanPluginHook', function () {
+			return $this->cleanPluginHookWork();
+		}, ['hook_plugin' => 'id_hook_plugin']);
+	}
+
+	protected function cleanPluginHookWork() {
 
 		$result = true;
 		$query = 'SELECT hp.id_plugin, hp.id_hook, h.name as hookname, p.name
@@ -1365,6 +1982,9 @@ class PhenyxTools {
 
 		foreach ($pluginHooks as $pluginhook) {
 
+			// L'exemption codee en dur de revslider est devenue inutile : elle
+			// est couverte par la regle generale du __call, plus bas. Elle est
+			// conservee un temps par prudence, mais ne devrait plus rien filtrer.
 			if ($pluginhook['name'] == 'revslider') {
 				continue;
 			}
@@ -1385,11 +2005,84 @@ class PhenyxTools {
 
 				$plugin = Plugin::getInstanceByName($pluginhook['name']);
 
+				// ⚠️ NE PAS CONFONDRE « ancre non implementee » ET « plugin non
+				//    construit ».
+				//
+				//    getInstanceByName() rend FALSE quand le chargement echoue —
+				//    fichier illisible, dependance absente, erreur au
+				//    constructeur. method_exists(false, ...) repond « non » pour
+				//    absolument tout : le plugin perdait alors la TOTALITE de ses
+				//    ancres.
+				//
+				//    Constate le 2026-07-30 : ph_ecommerce figurait parmi les
+				//    suppressions pour actionRegisterAutoloader, alors que
+				//    hookActionRegisterAutoloader existe bel et bien dans son
+				//    fichier. Ne pas pouvoir instancier un plugin ne prouve rien
+				//    sur ce qu'il implemente.
+				if (!is_object($plugin)) {
+					PhenyxLogger::addLog(
+						'cleanPluginHook — « ' . $pluginhook['name'] . ' » n\'a pas pu être instancié, '
+						. 'ses ancres sont conservées par précaution.',
+						2
+					);
+
+					continue;
+				}
+
+				// ⚠️ UN PLUGIN QUI ROUTE SES ANCRES PAR __call() N'A AUCUNE
+				//    METHODE LITTERALE — et method_exists() repond « non » pour
+				//    toutes. Le critere le condamnait donc en bloc.
+				//
+				//    Trois plugins sont dans ce cas : ph_manager (route tout
+				//    hookXxx vers contenthookvalue()), phenyxbanners (route les
+				//    hookdisplay* vers displayNativeHook()) et revslider — d'ou
+				//    l'exemption en dur de ce dernier, qui traitait le symptome
+				//    sans nommer la cause.
+				//
+				//    ph_manager est le plugin maitre : supprimer ses
+				//    enregistrements revient a eteindre l'affichage du site.
+				//
+				//    On ne peut pas savoir ce qu'un __call accepte. On s'abstient
+				//    donc, ce qui est la seule position tenable.
+				if (method_exists($plugin, '__call')) {
+					continue;
+				}
+
 				if (method_exists($plugin, 'hook' . $pluginhook['hookname']) || method_exists($plugin, 'hook' . $retroHookName)) {
 					$method = true;
 				}
 
 				if ($method) {
+					continue;
+				}
+
+				// On NOMME la suppression en simulation. Un decompte ne dit pas
+				// si une liste est raisonnable ; « ph_manager perd
+				// displayFooterBottom » le dit immediatement. Lecon des metas :
+				// 4 suppressions anonymes cachaient la page de connexion.
+				if ($this->dryRun) {
+
+					// Diagnostic : cinq hypotheses sont tombees pour expliquer
+					// pourquoi ph_ecommerce figure ici alors que la methode
+					// existe dans son fichier. On cesse de supposer et on
+					// consigne ce que le code VOIT — classe reelle de l'objet,
+					// noms exactement testes, delimites pour reveler tout
+					// caractere parasite.
+					$this->plan(
+						'hook_plugin',
+						'SUPPRESSION',
+						$pluginhook['name'] . ' perd l\'ancre ' . $pluginhook['hookname']
+						. '  [classe=' . get_class($plugin)
+						. ' | testé: «hook' . $pluginhook['hookname'] . '»'
+						. ' et «hook' . $retroHookName . '»'
+						. ' | méthodes hook de l\'objet: ' . count(array_filter(
+							get_class_methods($plugin),
+							function ($m) {
+								return stripos($m, 'hook') === 0;
+							}
+						)) . ']'
+					);
+
 					continue;
 				}
 
@@ -1399,8 +2092,6 @@ class PhenyxTools {
 
 		}
 
-		$result &= $this->removeAutoIncrement('hook_plugin', 'id_hook_plugin');
-		$result &= $this->dropPrimaryKeyIfExists('hook_plugin');
 		$query = 'SELECT `id_hook_plugin`  FROM `' . _DB_PREFIX_ . 'hook_plugin` ORDER BY `id_hook_plugin` ASC';
 		$hookPlugins = Db::getInstance()->executeS($query);
 		$maxIndex = Db::getInstance(_EPH_USE_SQL_SLAVE_)->getValue(
@@ -1432,25 +2123,107 @@ class PhenyxTools {
 
 		}
 
-		$result &= $this->addPrimaryKeyIfMissing('hook_plugin', '`id_hook_plugin`');
-		$result &= $this->setAutoIncrement('hook_plugin', 'id_hook_plugin');
 
 		if ($result) {
-			$this->context->phenyxConfig->updateValue('PLUGIN_HOOK_MAINTENANCE', date("Y-m-d"));
+			// En simulation on n'horodate pas : sinon l'analyse ferait croire
+			// a une maintenance faite, et l'execution reelle serait sautee.
+			if (!$this->dryRun) {
+				$this->context->phenyxConfig->updateValue('PLUGIN_HOOK_MAINTENANCE', date("Y-m-d"));
+			}
 		}
 
 		return $result;
 
 	}
 
+	/**
+	 * Enveloppe transactionnelle — le corps est dans cleanPluginsWork().
+	 * Voir transactional() pour le raisonnement.
+	 */
 	public function cleanPlugins() {
+
+		$ok = $this->transactional('cleanPlugins', function () {
+			return $this->cleanPluginsWork();
+		}, ['plugin' => 'id_plugin']);
+
+		if (!$ok) {
+			return false;
+		}
+
+		// Hors transaction, et seulement si la renumerotation a abouti : la
+		// reinitialisation des plugins fait du DDL, qui romprait la transaction.
+		// En simulation elle se contente de se declarer, sans rien executer.
+		$result = true;
+		$this->resetPlugin($result);
+
+		return (bool) $result;
+	}
+
+	protected function cleanPluginsWork() {
 
 		$result = true;
 
-		$result &= $this->removeAutoIncrement('plugin', 'id_plugin');
-		$result &= $this->dropPrimaryKeyIfExists('plugin');
-		$result &= $this->dropPrimaryKeyIfExists('plugin_access');
-		$result &= $this->dropPrimaryKeyIfExists('plugin_group');
+		// ─── Purge des lignes satellites orphelines, AVANT toute renumerotation ───
+		//
+		// La premiere passe ne deplace que les identifiants PRESENTS dans la
+		// table plugin. Une ligne satellite qui reference un plugin supprime
+		// garde donc son identifiant bas — et entre en collision quand la
+		// seconde passe redescend les autres vers 1..n.
+		//
+		// Constate le 2026-07-30 :
+		//   UPDATE eph_plugin_access SET id_plugin = 14 WHERE id_plugin = 80
+		// echouait sur la cle primaire composite (id_profile, id_plugin), une
+		// ligne occupant deja le couple vise.
+		//
+		// L'ancien code masquait le probleme en supprimant la cle primaire le
+		// temps de l'operation : il ne corrigeait rien, il FABRIQUAIT des
+		// doublons en silence. On supprime plutot les orphelins, ce qui est le
+		// seul traitement honnete — et c'est dans la transaction, donc annulable.
+		//
+		// id_plugin > 0 : certaines tables, payment_mode notamment, portent des
+		// lignes sans plugin rattache qui sont parfaitement legitimes.
+		$satellites = [
+			'hook_plugin',
+			'hook_plugin_exceptions',
+			'plugin_access',
+			'plugin_group',
+		];
+
+		if ($this->ephenyx_shop_active) {
+			$satellites[] = 'plugin_carrier';
+			$satellites[] = 'plugin_country';
+			$satellites[] = 'plugin_currency';
+			$satellites[] = 'payment_mode';
+		}
+
+		foreach ($satellites as $satellite) {
+
+			if (!$this->tableExists($satellite)) {
+				continue;
+			}
+
+			$orphans = (int) Db::getInstance()->getValue(
+				'SELECT COUNT(*) FROM `' . _DB_PREFIX_ . bqSQL($satellite) . '` s
+				 WHERE s.`id_plugin` > 0
+				   AND NOT EXISTS (SELECT 1 FROM `' . _DB_PREFIX_ . 'plugin` p WHERE p.`id_plugin` = s.`id_plugin`)'
+			);
+
+			if ($orphans === 0) {
+				continue;
+			}
+
+			if ($this->dryRun) {
+				$this->plan($satellite, 'PURGE ORPHELINS', $orphans . ' ligne(s) de « ' . $satellite . ' » désignent un plugin disparu');
+				continue;
+			}
+
+			$this->exec(
+				'DELETE s FROM `' . _DB_PREFIX_ . bqSQL($satellite) . '` s
+				 WHERE s.`id_plugin` > 0
+				   AND NOT EXISTS (SELECT 1 FROM `' . _DB_PREFIX_ . 'plugin` p WHERE p.`id_plugin` = s.`id_plugin`)',
+				$result
+			);
+		}
 
 		$query = 'SELECT id_plugin  FROM `' . _DB_PREFIX_ . 'plugin` ORDER BY id_plugin ASC';
 		$plugs = Db::getInstance()->executeS($query);
@@ -1487,8 +2260,19 @@ class PhenyxTools {
 
 		}
 
-		$query = 'SELECT id_plugin  FROM `' . _DB_PREFIX_ . 'plugin` ORDER BY position ASC';
+		// ── Ordre impose aux plugins socles ────────────────────────────────────
+		//
+		// Cinq plugins declarent « $this->removable = false » : ils ne peuvent
+		// jamais etre retires, et tout le reste s'appuie sur eux. Leur ordre de
+		// chargement compte, et la simple position en base ne le garantit pas —
+		// une renumerotation les eparpillait au gre de leur position courante.
+		//
+		// L'ordre ci-dessous est un CHOIX, il ne se deduit d'aucune donnee :
+		// ph_manager d'abord parce qu'il porte l'infrastructure, puis les trois
+		// obligatoires, puis revslider.
+		$query = 'SELECT id_plugin, name  FROM `' . _DB_PREFIX_ . 'plugin` ORDER BY position ASC';
 		$plugins = Db::getInstance()->executeS($query);
+		$plugins = $this->sortCorePluginsFirst($plugins);
 		$i = 1;
 
 		foreach ($plugins as $plugin) {
@@ -1522,19 +2306,115 @@ class PhenyxTools {
 
 		}
 
-		$result &= $this->addPrimaryKeyIfMissing('plugin', '`id_plugin`');
-		$result &= $this->setAutoIncrement('plugin', 'id_plugin');
-		$result &= $this->addPrimaryKeyIfMissing('plugin_access', '`id_profile`, `id_plugin`');
-		$result &= $this->addPrimaryKeyIfMissing('plugin_group', '`id_plugin`, `id_group`');
 
-		$result &= $this->resetPlugin($result);
+		// ⚠️ resetPlugin() N'EST PLUS APPELE ICI.
+		//
+		// Reinitialiser un plugin cree des tables et des onglets — donc du DDL,
+		// donc un COMMIT implicite en MySQL. Lance a l'interieur de la
+		// transaction, il l'aurait rompue en plein milieu et rendu la protection
+		// illusoire, ce qui est pire que pas de protection du tout puisqu'on
+		// croirait etre couvert.
+		//
+		// La renumerotation est donc validee d'abord, et la reinitialisation se
+		// fait apres, hors transaction — voir cleanPlugins().
 
 		if ($result) {
-			$this->context->phenyxConfig->updateValue('PLUGIN_MAINTENANCE', date("Y-m-d"));
+			// En simulation on n'horodate pas : sinon l'analyse ferait croire
+			// a une maintenance faite, et l'execution reelle serait sautee.
+			if (!$this->dryRun) {
+				$this->context->phenyxConfig->updateValue('PLUGIN_MAINTENANCE', date("Y-m-d"));
+			}
 		}
 
 		return $result;
 
+	}
+
+	/**
+	 * Ordre des plugins socles, celui dans lequel ils doivent etre numerotes.
+	 *
+	 * Ce sont les cinq qui declarent « $this->removable = false » : ils ne
+	 * peuvent jamais etre desinstalles. Verifie sur le depot le 2026-07-30.
+	 *
+	 * ⚠️ Cette liste doit rester en accord avec les declarations removable des
+	 * plugins. sortCorePluginsFirst() s'en assure a chaque passage et journalise
+	 * tout ecart, plutot que de laisser un nouveau plugin socle glisser
+	 * silencieusement en fin de liste.
+	 */
+	const CORE_PLUGIN_ORDER = [
+		'ph_manager',
+		'ph_upgrader',
+		'ph_blockcms',
+		'ph_link',
+		'revslider',
+	];
+
+	/**
+	 * Remonte les plugins socles en tete, dans l'ordre impose.
+	 *
+	 * Les autres conservent leur ordre d'entree — celui de leur position.
+	 *
+	 * @param array $plugins Lignes portant au moins « name »
+	 *
+	 * @return array
+	 */
+	public function sortCorePluginsFirst(array $plugins) {
+
+		$head = [];
+		$tail = [];
+		$byName = [];
+
+		foreach ($plugins as $plugin) {
+			$name = isset($plugin['name']) ? (string) $plugin['name'] : '';
+
+			if ($name !== '' && in_array($name, self::CORE_PLUGIN_ORDER, true)) {
+				$byName[$name] = $plugin;
+			} else {
+				$tail[] = $plugin;
+			}
+
+		}
+
+		// On suit l'ordre de la constante, pas celui de la base : c'est tout
+		// l'objet de la manoeuvre. Un socle absent de la base est simplement
+		// saute — il n'est peut-etre pas installe sur ce site.
+		foreach (self::CORE_PLUGIN_ORDER as $name) {
+
+			if (isset($byName[$name])) {
+				$head[] = $byName[$name];
+			}
+
+		}
+
+		// Filet : un plugin non desinstallable qui ne figure pas dans la
+		// constante se retrouverait relegue en fin de liste sans que personne
+		// le remarque. On le signale.
+		foreach ($tail as $plugin) {
+			$name = isset($plugin['name']) ? (string) $plugin['name'] : '';
+
+			if ($name === '') {
+				continue;
+			}
+
+			$file = _EPH_PLUGIN_DIR_ . $name . '/' . $name . '.php';
+
+			if (!@is_file($file)) {
+				continue;
+			}
+
+			$src = @file_get_contents($file);
+
+			if ($src !== false && preg_match('/\$this->removable\s*=\s*false/', $src)) {
+				PhenyxLogger::addLog(
+					'PhenyxTools::sortCorePluginsFirst — le plugin « ' . $name . ' » se declare non desinstallable '
+					. 'mais ne figure pas dans CORE_PLUGIN_ORDER : son rang n\'est pas garanti.',
+					2
+				);
+			}
+
+		}
+
+		return array_merge($head, $tail);
 	}
 
 	public function resetPlugin(&$result = true) {
@@ -1550,6 +2430,14 @@ class PhenyxTools {
 
 			if (file_exists(_EPH_SPECIFIC_PLUGIN_DIR_ . $plugin['name'] . '/' . $plugin['name'] . '.php')) {
 				require_once _EPH_SPECIFIC_PLUGIN_DIR_ . $plugin['name'] . '/' . $plugin['name'] . '.php';
+			}
+
+			// La reinitialisation d'un plugin est l'action la plus lourde de tout
+			// l'ecran : ancres reenregistrees, onglets reinstalles, topics
+			// resemes. En simulation on se contente de la nommer.
+			if ($this->dryRun) {
+				$this->plan('plugin', 'REINITIALISATION', 'Plugin « ' . $plugin['name'] . ' »');
+				continue;
 			}
 
 			if (class_exists($plugin['name'], false)) {
@@ -1589,7 +2477,18 @@ class PhenyxTools {
 
 	}
 
+	/**
+	 * Enveloppe transactionnelle — le corps est dans cleanHookWork().
+	 * Voir transactional() pour le raisonnement.
+	 */
 	public function cleanHook() {
+
+		return $this->transactional('cleanHook', function () {
+			return $this->cleanHookWork();
+		}, ['hook' => 'id_hook']);
+	}
+
+	protected function cleanHookWork() {
 
 		$result = true;
 
@@ -1654,11 +2553,24 @@ class PhenyxTools {
 
 		}
 
-		$sql = 'ALTER TABLE `' . _DB_PREFIX_ . 'hook` MODIFY `id_hook` int(10) UNSIGNED NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=' . $i . ';';
-		$this->exec($sql, $result);
+		// ⚠️ Un ALTER TABLE subsistait ici, sous une forme que mon retrait du
+		// 2026-07-30 n'avait pas vue : l'affectation et l'execution etaient sur
+		// deux lignes distinctes, alors que je ne cherchais que la forme en une
+		// seule.
+		//
+		// Il faisait doublon avec syncAutoIncrement(), appele apres validation —
+		// et surtout il rompait la transaction, puisqu'en MySQL tout ALTER TABLE
+		// valide implicitement. Une operation de 1 700 ecritures se retrouvait
+		// donc coupee en deux, la seconde moitie sans protection.
+		//
+		// Le recalage du compteur est desormais fait par l'enveloppe.
 
 		if ($result) {
-			$this->context->phenyxConfig->updateValue('HOOK_MAINTENANCE', date("Y-m-d"));
+			// En simulation on n'horodate pas : sinon l'analyse ferait croire
+			// a une maintenance faite, et l'execution reelle serait sautee.
+			if (!$this->dryRun) {
+				$this->context->phenyxConfig->updateValue('HOOK_MAINTENANCE', date("Y-m-d"));
+			}
 		}
 
 		return $result;

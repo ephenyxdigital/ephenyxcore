@@ -457,6 +457,13 @@ abstract class PhenyxAssistantLayer {
         $idLang = $this->resolveLangId($query->isoCode);
         $sourceController = isset($query->extra['sourceController']) ? (string) $query->extra['sourceController'] : null;
         $sourceType = isset($query->extra['sourceType']) ? (string) $query->extra['sourceType'] : null;
+        /*
+         * Onglet courant de l'écran (dataTab côté JS, cf. seo.js et frères) —
+         * troisième dimension de l'étage 0. Null quand l'écran n'a pas
+         * d'onglets ou que nav.js vient de le remettre à zéro : le liage
+         * d'écran classique répond alors, comme avant.
+         */
+        $sourceTab = isset($query->extra['sourceTab']) ? (string) $query->extra['sourceTab'] : null;
         $isContextual = !empty($query->extra['isContextual']);
 
         /* ------------------------------------------------------------------
@@ -470,7 +477,7 @@ abstract class PhenyxAssistantLayer {
          * 24/07/2026, tous issus de ce chemin.
          * ------------------------------------------------------------------ */
         if ($isContextual && PhenyxAssistantTopic::hasAnyScreenBinding()) {
-            $bound = PhenyxAssistantTopic::getBoundToScreen($sourceController, $sourceType, $idLang, $entityClass);
+            $bound = PhenyxAssistantTopic::getBoundToScreen($sourceController, $sourceType, $idLang, $entityClass, $sourceTab);
 
             if ($bound !== null) {
                 return $this->buildTopicAnswer($bound, $query, self::STAGE_SCREEN, 0.0);

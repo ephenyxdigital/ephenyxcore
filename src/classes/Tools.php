@@ -1886,8 +1886,58 @@ class Tools {
         return $domain;
     }
 
+    /**
+     * ⚠️ GENERATEUR HERITE — IL NE FAUT PLUS ECRIRE AVEC.
+     *
+     * ─── DEUX GENERATEURS, ET C'EST LE MAUVAIS QUI TOURNAIT ───
+     *
+     * Il existe deux versions de cette methode :
+     *
+     *   PhenyxTool::generateHtaccess()   la moderne. Elle ecrit le bloc de
+     *                                    securite : protection des .env / .sql /
+     *                                    .log, de config.inc.php, des
+     *                                    repertoires .git et node_modules, le
+     *                                    refus de TRACE/TRACK, la restriction
+     *                                    CORS des polices.
+     *
+     *   Tools::generateHtaccess()        celle-ci. Elle date d'avant ce bloc et
+     *                                    ne l'ecrit pas.
+     *
+     * Les ecrans du back-office appellent la moderne, via
+     * $this->context->_tools->generateHtaccess(). Mais Meta.php appelait cette
+     * version-ci a QUATRE endroits — apres chaque enregistrement, chaque
+     * suppression et chaque suppression multiple de meta. Autrement dit : la
+     * moindre operation sur une page meta REECRIVAIT le .htaccess sans aucune
+     * des regles de securite, et il n'y avait rien pour le signaler. Le fichier
+     * reste valide, le site continue de fonctionner, et les protections ont
+     * simplement disparu.
+     *
+     * Le meme piege guettait cleanMetas() dans PhenyxTools.
+     *
+     * ─── POURQUOI DELEGUER PLUTOT QUE CORRIGER LES APPELANTS ───
+     *
+     * Corriger les quatre appels de Meta.php aurait laisse le piege intact pour
+     * le prochain appelant. On redirige donc a la source : tout appel a cette
+     * methode part vers la moderne des qu'une instance est disponible, et les
+     * signatures sont identiques, parametre pour parametre. Le corps hérité
+     * n'est conserve que comme repli — installation en cours, ligne de commande,
+     * contexte incomplet — cas ou aucun .htaccess de production n'est en jeu.
+     *
+     * Verifie : PhenyxTool::generateHtaccess() ne rappelle jamais celle-ci, il
+     * n'y a donc pas de recursion possible.
+     *
+     * @return bool
+     */
     public static function generateHtaccess($path = null, $rewrite_settings = null, $cache_control = null, $specific = '', $disable_multiviews = null, $medias = false, $disable_modsec = null) {
-        
+
+        // Le contexte n'est pas garanti : amorçage, installation, ligne de
+        // commande. On ne suppose ni l'objet, ni la propriété.
+        $context = Context::getContext();
+        $tools = (is_object($context) && isset($context->_tools)) ? $context->_tools : null;
+
+        if (is_object($tools) && $tools instanceof PhenyxTool) {
+            return $tools->generateHtaccess($path, $rewrite_settings, $cache_control, $specific, $disable_multiviews, $medias, $disable_modsec);
+        }
 
         if (defined('EPH_INSTALLATION_IN_PROGRESS') && $rewrite_settings === null) {
             return true;
@@ -3143,18 +3193,27 @@ FileETag none
             $iterator->append(new DirectoryIterator(_EPH_ROOT_DIR_ . '/' . $directory. '/'));
         }
 
+        /*
+         * Meme correction que dans PhenyxTool::cleanEmptyDirectory().
+         *
+         * str_replace($fileName, '', $filePath) rendait le dossier PARENT,
+         * identique pour toutes les entrees : removeEmptyDirs() etait rappelee
+         * une fois par plugin sur la meme arborescence. Et sur l'entree « . »
+         * de DirectoryIterator, elle retirait tous les points du chemin.
+         */
         foreach ($iterator as $file) {
-            $fileName = $file->getFilename();
-            $filePath = $file->getPathname();
-            if (str_contains($filePath, '/cache/')) {
-				continue;
-			}
-            $path = str_replace($fileName, '', $filePath);
 
-            if (is_dir($path)) {
-                Tools::removeEmptyDirs($path);
+            if ($file->isDot() || !$file->isDir()) {
+                continue;
             }
 
+            $filePath = $file->getPathname();
+
+            if (str_contains($filePath, '/cache/') || $file->getFilename() === 'cache') {
+                continue;
+            }
+
+            PhenyxTool::getInstance()->removeEmptyDirs($filePath);
         }
 
         $iterator = new AppendIterator();
@@ -4925,28 +4984,52 @@ FileETag none
     }
 
 
+    /**
+     * Jumelle statique de PhenyxTool::removeEmptyDirs().
+     *
+     * Elle portait le meme defaut : glob() ignore les fichiers caches, donc un
+     * dossier ne contenant qu'un .htaccess passait pour vide et rmdir()
+     * echouait avec « Directory not empty ». Plutot que d'entretenir deux
+     * implementations qui divergeront, on delegue.
+     *
+     * Difference de contrat a connaitre : l'ancienne version parcourait les
+     * SOUS-dossiers de $path sans jamais supprimer $path lui-meme. On conserve
+     * ce comportement ici — des appelants comme la desinstallation de theme
+     * comptent dessus.
+     *
+     * @return bool
+     */
     public static function removeEmptyDirs($path) {
 
-        $dirs = glob($path . "*", GLOB_ONLYDIR);
+        $path = rtrim($path, '/\\');
 
-        foreach ($dirs as $dir) {
-            $files = glob($dir . "/*");
-            $innerDirs = glob($dir . "/*", GLOB_ONLYDIR);
+        if (!is_dir($path)) {
+            return false;
+        }
 
-            if (is_array($files) && count($files) == 1 && basename($files[0]) == 'index.php') {
+        $entrees = @scandir($path);
 
-                unlink($files[0]);
-                rmdir($dir);
+        if ($entrees === false) {
+            return false;
+        }
 
-            } else if (empty($files)) {
-                rmdir($dir);
-            } else
-            if (is_array($innerDirs) && count($innerDirs) > 0) {
-                Tools::removeEmptyDirs($dir . '/');
+        $outil = PhenyxTool::getInstance();
+
+        foreach ($entrees as $entree) {
+
+            if ($entree === '.' || $entree === '..') {
+                continue;
+            }
+
+            $complet = $path . '/' . $entree;
+
+            if (is_dir($complet) && !is_link($complet)) {
+                $outil->removeEmptyDirs($complet);
             }
 
         }
 
+        return true;
     }
 
     public static function buildMaps() {

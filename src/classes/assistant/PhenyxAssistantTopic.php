@@ -530,18 +530,40 @@ class PhenyxAssistantTopic extends PhenyxObjectModel {
      * écran peut ainsi avoir un topic générique et un topic spécifique à son
      * formulaire d'édition.
      *
+     * Résolution de l'ONGLET (2026-08-03) : troisième dimension de spécificité,
+     * après le contrôleur et le type. Les écrans multi-onglets (AdminSeo,
+     * AdminPreferences, AdminPerformance...) exposent l'onglet courant dans la
+     * variable JS globale dataTab — la 'key' de leur configurateur. Même
+     * philosophie de repli que source_type : l'onglet exact gagne, le liage
+     * `tab_key = ''` (tout l'écran) rattrape. Et l'onglet PRIME sur le type,
+     * parce qu'il est plus fin : un liage (onglet exact, type '') bat un liage
+     * (onglet '', type exact).
+     *
      * @param string|null $controllerName Cf. back_tab.class_name / current_controller (nav.js)
      * @param string|null $sourceType     'list'|'add'|'edit'|'view'|'home', cf. current_type (nav.js)
      * @param int         $idLang
      * @param string|null $entityClass    Même filtre que getActiveForLang() : une couche de
      *                                    plugin ne doit répondre que pour ses propres entités
+     * @param string|null $tabKey         Onglet courant de l'écran, cf. dataTab (seo.js et frères) ;
+     *                                    null ou '' = pas d'onglet, liages d'écran seuls
      * @return array|null Ligne brute, même forme que getActiveForLang()
      */
-    public static function getBoundToScreen($controllerName, $sourceType, $idLang, $entityClass = null) {
+    public static function getBoundToScreen($controllerName, $sourceType, $idLang, $entityClass = null, $tabKey = null) {
 
         if (empty($controllerName)) {
             return null;
         }
+
+        /*
+         * ⚠️ GARDE DE VERSION. La colonne tab_key naît d'une migration de la
+         * base CRM (upgrade_assistant_tab_key.php), et cette base est PARTAGÉE :
+         * ce code peut tourner avant qu'elle ait été jouée. Or DbPDO::_query()
+         * ne relance pas les erreurs SQL — il journalise et rend false. Une
+         * requête sur une colonne absente ne lèverait donc RIEN : l'étage 0
+         * entier deviendrait muet, en silence. On vérifie la colonne une fois
+         * par requête PHP, et on n'ajoute la dimension que si elle existe.
+         */
+        $avecOnglet = ($tabKey !== null && $tabKey !== '' && self::hasTabKeyColumn());
 
         $query = (new DbQuery())
             ->select('t.id_phenyx_assistant_topic, t.code, t.suggested_action, t.confidence, tl.label, tl.keywords, tl.answer, tl.quick_replies, ts.source_type, ts.priority')
@@ -559,15 +581,33 @@ class PhenyxAssistantTopic extends PhenyxObjectModel {
             $query->where('t.entity_class = \'' . pSQL($entityClass) . '\'');
         }
 
+        /*
+         * Les tris se COMPOSENT : (onglet exact) DESC d'abord, puis
+         * (type exact) DESC, puis priority. Sans onglet demandé — écran sans
+         * onglets, dataTab remis à null par nav.js, ou base non migrée — on ne
+         * sert QUE les liages tab_key = '' : comportement strictement identique
+         * à avant la migration.
+         */
+        $ordre = [];
+
+        if ($avecOnglet) {
+            $query->where('ts.tab_key IN (\'' . pSQL($tabKey) . '\', \'\')');
+            $ordre[] = '(ts.tab_key = \'' . pSQL($tabKey) . '\') DESC';
+        } else if (self::hasTabKeyColumn()) {
+            $query->where('ts.tab_key = \'\'');
+        }
+
         if (!empty($sourceType)) {
             $query->where('ts.source_type IN (\'' . pSQL($sourceType) . '\', \'\')');
             // Le type exact gagne sur le liage générique, puis priority départage
             // deux liages de même spécificité.
-            $query->orderBy('(ts.source_type = \'' . pSQL($sourceType) . '\') DESC, ts.priority DESC');
+            $ordre[] = '(ts.source_type = \'' . pSQL($sourceType) . '\') DESC';
         } else {
             $query->where('ts.source_type = \'\'');
-            $query->orderBy('ts.priority DESC');
         }
+
+        $ordre[] = 'ts.priority DESC';
+        $query->orderBy(implode(', ', $ordre));
 
         try {
             $row = self::getCrmDb()->getRow($query);
@@ -1662,6 +1702,40 @@ class PhenyxAssistantTopic extends PhenyxObjectModel {
     }
 
     /**
+     * La colonne tab_key existe-t-elle sur la table des liages ?
+     *
+     * Garde de version pour la dimension ONGLET (migration
+     * upgrade_assistant_tab_key.php). Même motif que hasAnyScreenBinding()
+     * ci-dessous, et pour la même raison : la base CRM est partagée, ce code
+     * peut la précéder. Sans cette garde, une requête mentionnant tab_key sur
+     * une base non migrée rendrait false sans lever — DbPDO n'expose pas les
+     * erreurs SQL — et l'étage 0 entier deviendrait muet en silence.
+     *
+     * Résultat mémorisé pour la durée de la requête PHP.
+     *
+     * @return bool
+     */
+    public static function hasTabKeyColumn() {
+
+        static $has = null;
+
+        if ($has !== null) {
+            return $has;
+        }
+
+        try {
+            $colonnes = self::getCrmDb()->executeS(
+                'SHOW COLUMNS FROM `' . _DB_PREFIX_ . 'phenyx_assistant_topic_screen` LIKE \'tab_key\''
+            );
+            $has = (is_array($colonnes) && count($colonnes) > 0);
+        } catch (\Throwable $e) {
+            $has = false;
+        }
+
+        return $has;
+    }
+
+    /**
      * Existe-t-il AU MOINS UN liage écran → topic en base ?
      *
      * Garde anti-régression indispensable au déploiement de l'étage 0. Le paquet
@@ -2024,11 +2098,29 @@ class PhenyxAssistantTopic extends PhenyxObjectModel {
             $sourceType = isset($binding['source_type']) ? (string) $binding['source_type'] : '';
             $priority = isset($binding['priority']) ? (int) $binding['priority'] : 0;
 
+            /*
+             * Dimension ONGLET (2026-08-03) : une entree peut porter
+             * 'tab' => 'generalParams' pour ne viser qu'un onglet de l'ecran
+             * (cf. dataTab cote JS). '' = tout l'ecran, comme avant.
+             *
+             * ⚠️ Sur une base non migree, un liage d'onglet est IGNORE et
+             * compte en 'skipped' — plutot que d'etre silencieusement ecrase
+             * en liage d'ecran, ce qui ferait repondre le topic d'un onglet a
+             * l'ecran entier. Le liage d'ecran classique, lui, passe partout.
+             */
+            $tabKey = isset($binding['tab']) ? (string) $binding['tab'] : '';
+            $colonneTab = self::hasTabKeyColumn();
+
+            if ($tabKey !== '' && !$colonneTab) {
+                $report['skipped']++;
+                continue;
+            }
+
             try {
                 $ok = $db->execute(
                     'INSERT INTO `' . _DB_PREFIX_ . 'phenyx_assistant_topic_screen`
-                        (`id_phenyx_assistant_topic`, `controller_name`, `source_type`, `priority`)
-                     VALUES (' . (int) $idTopic . ', \'' . pSQL($binding['controller']) . '\', \'' . pSQL($sourceType) . '\', ' . $priority . ')
+                        (`id_phenyx_assistant_topic`, `controller_name`, `source_type`, ' . ($colonneTab ? '`tab_key`, ' : '') . '`priority`)
+                     VALUES (' . (int) $idTopic . ', \'' . pSQL($binding['controller']) . '\', \'' . pSQL($sourceType) . '\', ' . ($colonneTab ? '\'' . pSQL($tabKey) . '\', ' : '') . $priority . ')
                      ON DUPLICATE KEY UPDATE
                         `id_phenyx_assistant_topic` = ' . (int) $idTopic . ',
                         `priority` = ' . $priority

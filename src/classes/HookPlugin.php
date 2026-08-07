@@ -64,23 +64,54 @@ class HookPlugin extends PhenyxObjectModel {
 
     }
 
+    /**
+     * Decale d'un rang les greffes situees a $position et au-dela, pour faire de
+     * la place a celle qu'on insere.
+     *
+     * ─── LE FILTRE PORTAIT SUR LE MAUVAIS CHAMP ───
+     *
+     * La requete etait bornee par « id_plugin = <ce plugin> » au lieu de
+     * « id_hook = <cette ancre> ». Comme un plugin est greffe sur plusieurs
+     * ancres — souvent des dizaines —, chaque insertion ou deplacement dans UNE
+     * ancre repoussait les positions de ce meme plugin dans TOUTES les autres.
+     * L'ordre d'affichage du front derivait donc a chaque manipulation, sans que
+     * rien ne le signale, et l'ancre reellement modifiee etait la seule a ne pas
+     * bouger.
+     *
+     * L'origine est un copier-coller depuis une classe de menu : le reste de la
+     * methode parle encore de « $menus », et update() nomme sa copie « $oldMenu ».
+     * Les deux autres methodes de position de cette classe,
+     * getNewLastPosition() et cleanPositions(), sont bien bornees par id_hook —
+     * celle-ci etait la seule intruse.
+     *
+     * @param int $position
+     *
+     * @return void
+     */
     public function adjustPosition($position) {
 
-        $menus = Db::getInstance(_EPH_USE_SQL_SLAVE_)->executeS(
+        $grafts = Db::getInstance(_EPH_USE_SQL_SLAVE_)->executeS(
             (new DbQuery())
-                ->select('t.`id_hook_plugin`, t.`position`, t.`id_plugin`')
+                ->select('t.`id_hook_plugin`, t.`position`')
                 ->from('hook_plugin', 't')
-                ->where('t.`id_plugin` = ' . (int) $this->id_plugin)
+                ->where('t.`id_hook` = ' . (int) $this->id_hook)
+                ->where('t.`id_hook_plugin` != ' . (int) $this->id)
                 ->where('t.`position` >= ' . (int) $position)
                 ->orderBy('t.`position` ASC')
         );
-        $i = $position + 1;
 
-        foreach ($menus as $menu) {
-            $sql = 'UPDATE `' . _DB_PREFIX_ . 'hook_plugin` SET `position` = ' . (int) $i . ' WHERE `id_hook_plugin` = ' . (int) $menu['id_hook_plugin'];
-            $result = Db::getInstance()->execute($sql);
+        if (!is_array($grafts)) {
+            return;
+        }
+
+        $i = (int) $position + 1;
+
+        foreach ($grafts as $graft) {
+            Db::getInstance()->execute(
+                'UPDATE `' . _DB_PREFIX_ . 'hook_plugin` SET `position` = ' . (int) $i
+                . ' WHERE `id_hook_plugin` = ' . (int) $graft['id_hook_plugin']
+            );
             $i++;
-
         }
 
     }

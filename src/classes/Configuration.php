@@ -150,6 +150,32 @@ class Configuration extends PhenyxObjectModel {
     ];
     /** @var array Configuration cache */
     protected static $_cache = [];
+
+    /**
+     * Le tableau complet a-t-il ete charge depuis la base ?
+     *
+     * ─── POURQUOI UN DRAPEAU, ET NON UN COMPTAGE (2026-08-07) ───
+     *
+     * configurationIsLoaded() se contentait de compter les entrees de
+     * $_cache['configuration']. Or set() — que updateValue() appelle a chaque
+     * enregistrement — y ecrit UNE SEULE clef. Des cet instant le compte vaut
+     * 1, la methode repondait « charge », et loadConfiguration() n'etait plus
+     * jamais appelee.
+     *
+     * Le tableau ne contenait donc que les quelques clefs ecrites a la main,
+     * et TOUTES les autres repartaient en base a chaque lecture. C'est la
+     * cause reelle des 233 lectures de EPH_LANG_DEFAULT par page : non pas un
+     * cache absent, mais un cache que l'on croyait plein alors qu'il tenait
+     * dans une ligne.
+     *
+     * Le piege ne se voyait pas depuis un script isole : sans updateValue()
+     * prealable, le premier get() chargeait bien tout, et la mesure affichait
+     * zero requete. Il fallait le contexte du back-office, ou un
+     * enregistrement precede les lectures, pour que le defaut se manifeste.
+     *
+     * @var bool
+     */
+    protected static $chargementComplet = false;
     /** @var array Vars types */
     protected static $types = [];
     /** @var string Key */
@@ -209,14 +235,17 @@ class Configuration extends PhenyxObjectModel {
 
     public function configurationIsLoaded() {
 
-        return isset(static::$_cache['configuration'])
-        && is_array(static::$_cache['configuration'])
-        && count(static::$_cache['configuration']);
+        // cf. $chargementComplet : un comptage ne distingue pas « tout charge »
+        // de « une seule clef posee par set() ».
+        return static::$chargementComplet
+        && isset(static::$_cache['configuration'])
+        && is_array(static::$_cache['configuration']);
     }
 
     public function clearConfigurationCacheForTesting() {
 
         static::$_cache = [];
+        static::$chargementComplet = false;
     }
 
     public function getGlobalValue($key, $idLang = null) {
@@ -230,30 +259,74 @@ class Configuration extends PhenyxObjectModel {
             return false;
         }
 
-        $context = null;
-
-        if ($use_cache && class_exists('Context')) {
-
-            if (!is_object($this->context->_session)) {
-                $this->context->_session = PhenyxSession::getInstance();
-            }
-
-            $result = $this->context->_session->get('cnfig_' . $key . '_' . $idLang);
-
-            if (!empty($result)) {
-                return $result;
-            }
-
-        }
-
+        /*
+         * ═══ POURQUOI CETTE METHODE LANCAIT 727 REQUETES PAR PAGE ═══
+         *
+         * Releve du 2026-08-07, onglet « Double » du profilage : 233 lectures
+         * de EPH_LANG_DEFAULT, 228 de EPH_REWRITING_SETTINGS, 129 de
+         * EPH_PAGE_CACHE_ENABLED, 63 de EPH_PAGE_CACHE_TYPE... sur 992
+         * requetes au total.
+         *
+         * Le cache existait pourtant, et a deux etages. Les deux etaient hors
+         * service :
+         *
+         *  1. loadConfiguration() charge TOUTE la table en une requete dans
+         *     static::$_cache['configuration'][$lang]['global'][$nom]. Cette
+         *     methode etait bien appelee... puis le tableau obtenu etait
+         *     ignore, et une requete individuelle partait quand meme. Le
+         *     tableau n'etait lu NULLE PART pour servir une valeur.
+         *
+         *  2. Un second cache, en session, echouait systematiquement :
+         *
+         *     - la clef etait fabriquee AVANT le cast `(int) $idLang`, quatre
+         *       lignes plus bas : un appel avec null lisait « cnfig_X_ » et
+         *       ecrivait « cnfig_X_0 ». Les deux ne se rencontraient jamais ;
+         *     - le test `!empty($result)` traitait une valeur a 0 ou vide
+         *       comme un cache absent — soit precisement le cas de
+         *       EPH_PAGE_CACHE_ENABLED et EPH_REWRITING_SETTINGS.
+         *
+         * ⚠️ Et surtout : ce cache de session n'etait invalide PAR PERSONNE.
+         * updateValue() ecrit bien en session, mais sous « cnfig_X-lang »
+         * (tiret), clef destinee a hasKey(). Le reparer tel quel aurait fige
+         * la configuration pour toute la duree de la session : une valeur
+         * modifiee ne serait plus jamais relue. C'est pour cela qu'il est
+         * SUPPRIME et non corrige.
+         *
+         * On s'appuie donc uniquement sur le cache statique, qui a les bonnes
+         * proprietes : rempli en une requete, rafraichi par set() — donc par
+         * updateValue() qui la termine — vide par deleteByName() et
+         * deleteFromContext(), et mort a la fin de la requete HTTP.
+         */
         $this->validateKey($key);
 
-        if (!$this->configurationIsLoaded()) {
-            $this->loadConfiguration($context);
-        }
-
+        // Le cast d'abord : tout ce qui suit s'indexe dessus.
         $idLang = (int) $idLang;
 
+        if ($use_cache) {
+
+            if (!$this->configurationIsLoaded()) {
+                $this->loadConfiguration();
+            }
+
+            /*
+             * array_key_exists et non isset : une valeur legitimement nulle
+             * doit compter comme trouvee, sans quoi on repart en base a chaque
+             * appel — l'erreur meme que corrige ce correctif.
+             */
+            if (isset(static::$_cache['configuration'][$idLang]['global'])
+                && array_key_exists($key, static::$_cache['configuration'][$idLang]['global'])) {
+
+                return static::$_cache['configuration'][$idLang]['global'][$key];
+            }
+
+        }
+
+        /*
+         * Filet de securite : clef ecrite en base apres le chargement du
+         * tableau, ou appel explicite avec $use_cache a false. Le resultat
+         * rejoint le cache pour que le cas ne se represente pas dans la meme
+         * requete.
+         */
         $sql = new DbQuery();
 
         if ($idLang > 0) {
@@ -271,9 +344,17 @@ class Configuration extends PhenyxObjectModel {
         $sql->where('c.`name` = \'' . $key . '\'');
         $value = Db::getInstance(_EPH_USE_SQL_SLAVE_)->getValue($sql);
 
-        if (class_exists('Context')) {
-            $this->context->_session->set('cnfig_' . $key . '_' . $idLang, $value);
+        // deleteByName() et deleteFromContext() remettent le cache a null : on
+        // ne veut pas indexer null sur un serveur ou display_errors est actif.
+        if (!is_array(static::$_cache['configuration'])) {
+            static::$_cache['configuration'] = [];
         }
+
+        if (!isset(static::$_cache['configuration'][$idLang])) {
+            static::$_cache['configuration'][$idLang] = ['global' => []];
+        }
+
+        static::$_cache['configuration'][$idLang]['global'][$key] = $value;
 
         return $value;
     }
@@ -353,33 +434,45 @@ class Configuration extends PhenyxObjectModel {
 
     public function loadConfigurationFromDB() {
 
-        if (!is_object($this->context->_session)) {
-            $this->context->_session = PhenyxSession::getInstance();
-        }
-
-        $rows = null;
-        $result = $this->context->_session->get('loadConfigurationFromDB');
-
-        if (!empty($result) && is_array($result)) {
-            $rows = $result;
-        }
-
+        /*
+         * ⚠️ L'INSTANTANE EN SESSION A ETE RETIRE (2026-08-07).
+         *
+         * Cette methode gardait en session, sous la clef
+         * 'loadConfigurationFromDB', une copie de TOUTE la table de
+         * configuration — et la relisait en priorite au chargement suivant.
+         *
+         * Or rien ne l'invalidait jamais : ni updateValue(), ni
+         * deleteByName(), ni deleteFromContext(). Une valeur modifiee depuis
+         * le back-office ne serait donc jamais reapparue tant que la session
+         * de l'employe vivait.
+         *
+         * Ce piege ne s'est pas declenche jusqu'ici parce que get() ignorait
+         * ce tableau et repartait en base a chaque appel — c'est-a-dire que
+         * les 727 requetes par page MASQUAIENT le cache casse. En branchant
+         * get() sur le cache, il fallait donc retirer l'instantane dans le
+         * meme geste, faute de quoi on gagnait la vitesse en perdant la
+         * justesse.
+         *
+         * Une requete par requete HTTP : c'est le bon compromis, et cela reste
+         * une requete au lieu de sept cent vingt-sept.
+         */
         static::$_cache['configuration'] = [];
+        static::$chargementComplet = false;
 
-        if (is_null($rows)) {
-            $rows = Db::getInstance()->executeS(
-                (new DbQuery())
-                    ->select('c.`name`, cl.`id_lang`, IFNULL(cl.`value_lang`, c.`value`) AS `value`')
-                    ->from('configuration', 'c')
-                    ->leftJoin('configuration_lang', 'cl', 'c.`id_configuration` = cl.`id_configuration`')
-            );
-        }
+        $rows = Db::getInstance()->executeS(
+            (new DbQuery())
+                ->select('c.`name`, cl.`id_lang`, IFNULL(cl.`value_lang`, c.`value`) AS `value`')
+                ->from('configuration', 'c')
+                ->leftJoin('configuration_lang', 'cl', 'c.`id_configuration` = cl.`id_configuration`')
+        );
 
         if (!is_array($rows)) {
+            // Echec de lecture : on ne pretend surtout pas au chargement
+            // complet, sans quoi toutes les clefs seraient reputees absentes.
             return;
         }
 
-        $this->context->_session->set('loadConfigurationFromDB', $rows);
+        static::$chargementComplet = true;
 
         foreach ($rows as $row) {
             $lang = ($row['id_lang']) ? $row['id_lang'] : 0;
@@ -597,6 +690,7 @@ class Configuration extends PhenyxObjectModel {
         $result2 = Db::getInstance()->delete('configuration', '`name` = "' . $key . '"');
 
         static::$_cache['configuration'] = null;
+        static::$chargementComplet = false;
 
         return ($result && $result2);
     }
@@ -614,6 +708,7 @@ class Configuration extends PhenyxObjectModel {
         );
 
         static::$_cache['configuration'] = null;
+        static::$chargementComplet = false;
     }
 	 public function isLangKey($key) {
 

@@ -71,9 +71,23 @@ class TranslateApi extends ExternalApi {
             return ['key' => (string) $this->provider->auth_key];
         }
 
-        $key = Configuration::get('EPH_GOOGLE_TRANSLATE_API_KEY');
+        // Configuration::get() n'est PAS statique dans ce depot : la lecture
+        // passe par le contexte, comme partout ailleurs dans quantumcore
+        // (cf. Meta.php). Un Configuration::get() statique leve un fatal.
+        $key = '';
 
-        return !empty($key) ? ['key' => (string) $key] : [];
+        try {
+            $context = Context::getContext();
+
+            if ($context !== null && isset($context->phenyxConfig)) {
+                $key = (string) $context->phenyxConfig->get('EPH_GOOGLE_TRANSLATE_API_KEY');
+            }
+
+        } catch (\Throwable $e) {
+            return [];
+        }
+
+        return $key !== '' ? ['key' => $key] : [];
     }
 
     /**

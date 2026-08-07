@@ -2092,7 +2092,16 @@ abstract class PhenyxController {
     }
 
     public function openTargetController($active) {
+		
+		$this->checkAccess();
 
+        if (empty($this->tabAccess['view'])) {
+            die($this->context->_tools->jsonEncode([
+                'success' => false,
+                'message' => $this->la('Your administrative profile does not allow you to view this object'),
+            ]));
+        }
+		
         $this->paragridScript = $this->generateParaGridScript();
         $data = $this->createTemplate($this->table . '.tpl');
         $extraVars = $this->context->_hook->exec('action' . $this->controller_name . 'TargetGetExtraVars', ['controller_type' => $this->controller_type], null, true);
@@ -2231,6 +2240,15 @@ abstract class PhenyxController {
     }
 
     public function ajaxProcessViewTargetController() {
+		
+		$this->checkAccess();
+
+        if (empty($this->tabAccess['view'])) {
+            die($this->context->_tools->jsonEncode([
+                'success' => false,
+                'message' => $this->la('Your administrative profile does not allow you to view this object'),
+            ]));
+        }
 
         $this->ajax_display = 'view';
         $this->ajax_li = '<li id="view' . $this->controller_name . '" data-type="view"  data-self="' . $this->link_rewrite . '" data-name="' . $this->page_title . '" data-controller="' . $this->controller_name . '"><a href="#contentview' . $this->controller_name . '"><i class="'.$this->backtab->fa_duatone.'"></i>' . $this->viewName . '</a><button type="button" class="close tabdetail" onClick="closeViewObject(\'' . $this->controller_name . '\');" data-id="view' . $this->controller_name . '"><i class="fa-duotone fa-regular fa-circle-xmark"></i></button></li>';
@@ -2241,10 +2259,21 @@ abstract class PhenyxController {
     }
 
     public function ajaxProcessOpenTargetController() {
+		
+		$this->checkAccess();
+
+        if (empty($this->tabAccess['view'])) {
+            die($this->context->_tools->jsonEncode([
+                'success' => false,
+                'message' => $this->la('Your administrative profile does not allow you to view this object'),
+            ]));
+        }
 
         if ($this->cachable) {
 
-            if ($this->context->cache_enable) {
+            // cf. profilageActif() : en mode profilage on ne sert JAMAIS la
+            // page depuis le cache, sinon le rapport lui-meme est un fossile.
+            if ($this->context->cache_enable && !$this->profilageActif()) {
 
                 if (is_object($this->context->cache_api)) {
                     $value = $this->context->cache_api->getData($this->cacheId);
@@ -2469,7 +2498,8 @@ abstract class PhenyxController {
 
             if ($this->cachable) {
 
-                if ($this->context->cache_enable) {
+                // cf. profilageActif()
+                if ($this->context->cache_enable && !$this->profilageActif()) {
 
                     if (is_object($this->context->cache_api)) {
                         $value = $this->context->cache_api->getData($this->cacheId);
@@ -2589,7 +2619,8 @@ abstract class PhenyxController {
 
             if ($this->cachable) {
 
-                if ($this->context->cache_enable) {
+                // cf. profilageActif()
+                if ($this->context->cache_enable && !$this->profilageActif()) {
 
                     if (is_object($this->context->cache_api)) {
                         $value = $this->context->cache_api->getData($this->cacheId);
@@ -2902,9 +2933,39 @@ abstract class PhenyxController {
         die($this->context->_tools->jsonEncode($result));
     }
 
+    /**
+     * Ouvre le formulaire de CREATION d'un objet.
+     *
+     * ⚠️ CETTE METHODE N'AVAIT AUCUN CONTROLE DE PERMISSION (signale par Jeff
+     * le 2026-08-03). Sa jumelle ajaxProcessEditObject() exige pourtant
+     * tabAccess['edit'] depuis toujours, et ajaxProcessDuplicateObject() aussi.
+     * Un profil sans droit d'ajout voyait donc le formulaire de creation
+     * s'ouvrir normalement — le refus n'arrivait qu'a l'enregistrement, s'il
+     * arrivait.
+     *
+     * ⚠️ La garde generique de AdminController::postProcess ne pouvait pas
+     * rattraper ce cas : elle demarre en MODE OBSERVATION (elle consigne le
+     * refus et laisse passer), et c'est voulu — allumer d'un coup un controle
+     * qui n'a jamais tourne bloquerait des gestes legitimes. Le controle POSE
+     * ICI, lui, s'applique tout de suite, comme celui de l'edition. Les deux
+     * sont complementaires : le generique attrape les 401 actions qu'on ne
+     * peut pas relire une a une, le specifique protege les portes principales
+     * sans attendre la bascule.
+     *
+     * Le message reprend mot pour mot la forme de celui de l'edition, pour que
+     * l'employe lise la meme phrase quel que soit le geste refuse.
+     */
     public function ajaxProcessAddObject() {
 
         $this->checkAccess();
+
+        if (empty($this->tabAccess['add'])) {
+            die($this->context->_tools->jsonEncode([
+                'success' => false,
+                'message' => $this->la('Your administrative profile does not allow you to add this object'),
+            ]));
+        }
+
         $_GET['controller'] = $this->controller_name;
         $_GET['add' . $this->table] = "";
         $_GET['id_parent'] = $this->context->_tools->getValue('idParent', '');
@@ -3270,7 +3331,7 @@ abstract class PhenyxController {
 
         $this->checkAccess();
 
-        if ($this->tabAccess['edit'] == 1) {
+        if ($this->tabAccess['add'] == 1) {
 
             $idObject = $this->context->_tools->getValue('idObject');
             $objet = new $this->className($idObject);
@@ -3304,16 +3365,442 @@ abstract class PhenyxController {
         die($this->context->_tools->jsonEncode($result));
     }
 
+    /* ═══════════════════════════════════════════════════════════════════════
+     * CONTROLE DE PERMISSION SUR LES ACTIONS AJAX
+     *
+     * ─── LE CONSTAT ───
+     *
+     * checkAccess() ne verifie que deux choses : que l'employe est connecte, et
+     * que le jeton est valide. AUCUNE permission d'onglet. Or 401 methodes
+     * ajaxProcess* existent dans les seuls controleurs du coeur, et 11 fichiers
+     * sur 68 mentionnent tabAccess. Autrement dit, un employe connecte pouvait
+     * appeler a peu pres n'importe quelle action de n'importe quel ecran, y
+     * compris ceux que son profil n'a pas le droit d'ouvrir.
+     *
+     * Les corriger une a une n'etait pas realiste — et surtout, la 402e serait
+     * repartie sans garde. Le controle se pose donc au POINT DE PASSAGE, la ou
+     * AdminController choisit la methode a appeler.
+     *
+     * ─── LA CORRESPONDANCE VERBE → DROIT ───
+     *
+     * Elle est etablie sur les verbes REELLEMENT employes, releves le
+     * 2026-08-03 : get (96), update (56), add (33), delete (24), open (14),
+     * active (13), edit (11)... et non sur une nomenclature imaginee.
+     *
+     * En cas de verbe inconnu, on exige « view » — le droit qu'il faut deja
+     * pour ouvrir l'ecran. C'est volontairement le plus permissif : un verbe
+     * nouveau ne doit pas bloquer du jour au lendemain un geste qui marchait.
+     *
+     * ⚠️ MODE OBSERVATION PAR DEFAUT. Tant que EPH_AJAX_RIGHTS_MODE ne vaut pas
+     * « enforce », RIEN N'EST BLOQUE : le refus qui aurait eu lieu part dans le
+     * journal des erreurs, et l'action s'execute. C'est la seule facon
+     * raisonnable d'allumer un controle qui n'a jamais tourne sur une matrice
+     * de droits dont on ignore si elle est complete. On regarde le journal
+     * quelques jours, puis on bascule.
+     * ═══════════════════════════════════════════════════════════════════════ */
+
+    /**
+     * Verbes de tete, du plus long au plus court : « bulkdelete » doit etre
+     * reconnu avant « bulk », « regenerate » avant « generate ».
+     */
+    public static $verbesDroits = [
+        'delete'     => 'delete',
+        'bulkdelete' => 'delete',
+        'remove'     => 'delete',
+        'erase'      => 'delete',
+        'truncate'   => 'delete',
+        'purge'      => 'delete',
+
+        'add'        => 'add',
+        'create'     => 'add',
+        'duplicate'  => 'add',
+        'upload'     => 'add',
+        'import'     => 'add',
+
+        'update'     => 'edit',
+        'edit'       => 'edit',
+        'save'       => 'edit',
+        'submit'     => 'edit',
+        'active'     => 'edit',
+        'enable'     => 'edit',
+        'disable'    => 'edit',
+        'toggle'     => 'edit',
+        'toogle'     => 'edit',
+        'switch'     => 'edit',
+        'set'        => 'edit',
+        'reset'      => 'edit',
+        'clean'      => 'edit',
+        'clear'      => 'edit',
+        'move'       => 'edit',
+        'sort'       => 'edit',
+        'position'   => 'edit',
+        'manage'     => 'edit',
+        'config'     => 'edit',
+        'proceed'    => 'edit',
+        'validate'   => 'edit',
+        'generate'   => 'edit',
+        'regenerate' => 'edit',
+        'install'    => 'edit',
+        'uninstall'  => 'edit',
+
+        /*
+         * Verbes releves en passant les 348 noms reels dans la correspondance :
+         * ceux-ci ne commencaient par aucun verbe connu et retombaient donc sur
+         * « view ». Le plus parlant : ExecuteCronJob, qui LANCE une tache, etait
+         * classe en simple consultation — c'est justement l'action signalee au
+         * depart. Un releve valait mieux qu'une liste devinee.
+         */
+        'execute'    => 'edit',
+        'run'        => 'edit',
+        'launch'     => 'edit',
+        'build'      => 'edit',
+        'rebuild'    => 'edit',
+        'change'     => 'edit',
+        'modify'     => 'edit',
+        'invalidate' => 'edit',
+        'mark'       => 'edit',
+        'menu'       => 'edit',
+        'push'       => 'edit',
+        'post'       => 'edit',
+        'register'   => 'edit',
+        'unregister' => 'edit',
+        'unhook'     => 'edit',
+        'restore'    => 'edit',
+        'sync'       => 'edit',
+        'resync'     => 'edit',
+        'turn'       => 'edit',
+        'translate'  => 'edit',
+        'theme'      => 'edit',
+        'webp'       => 'edit',
+        'color'      => 'edit',
+        'scan'       => 'edit',
+        'send'       => 'edit',
+        'forward'    => 'edit',
+        'reply'      => 'edit',
+        'resolve'    => 'edit',
+
+        /*
+         * ⚠️ Fautes de frappe presentes dans les noms de methodes du depot.
+         * Les corriger casserait les appels ; les ignorer laisserait ces
+         * actions sans garde. On les reconnait donc telles quelles.
+         */
+        'disabele'   => 'edit',
+        'generete'   => 'edit',
+        'swith'      => 'edit',
+        'genere'     => 'edit',
+
+        /*
+         * ─── SECOND RELEVE : LES 753 ACTIONS DES PLUGINS ───
+         *
+         * Toute la hierarchie des controleurs d'administration de plugins
+         * descend d'AdminController, donc la garde les couvre. Mais leur
+         * vocabulaire est different de celui du coeur : 68 tetes de verbe n'y
+         * figuraient pas.
+         *
+         * On n'ajoute ici que celles qui MODIFIENT de facon evidente. Les
+         * ambigues — auto(complete), available, index, piece, product, prices,
+         * receipt, student, download, print, filter... — sont laissees au
+         * defaut « view » a dessein : mieux vaut une garde qui laisse passer un
+         * cas douteux qu'une garde qui refuse un geste legitime le jour de la
+         * bascule. Le journal du mode observation dira si l'une d'elles merite
+         * d'etre reclassee.
+         */
+        'new'        => 'add',
+        'copy'       => 'add',
+
+        'anonymize'  => 'delete',
+
+        'activate'   => 'edit',
+        'deactivate' => 'edit',
+        'inactive'   => 'edit',
+        'allow'      => 'edit',
+        'disallow'   => 'edit',
+        'attach'     => 'edit',
+        'block'      => 'edit',
+        'unblock'    => 'edit',
+        'book'       => 'edit',
+        'bulk'       => 'edit',
+        'cancel'     => 'edit',
+        'close'      => 'edit',
+        'correct'    => 'edit',
+        'draft'      => 'edit',
+        'finish'     => 'edit',
+        'hide'       => 'edit',
+        'show'       => 'edit',
+        'init'       => 'edit',
+        'link'       => 'edit',
+        'unlink'     => 'edit',
+        'pack'       => 'edit',
+        'publish'    => 'edit',
+        'process'    => 'edit',
+        'remind'     => 'edit',
+        'resend'     => 'edit',
+        'reserve'    => 'edit',
+        'sent'       => 'edit',
+        'start'      => 'edit',
+        'suspend'    => 'edit',
+        'transfert'  => 'edit',
+        'uncheck'    => 'edit',
+        'wizard'     => 'edit',
+
+        'get'        => 'view',
+        'list'       => 'view',
+        'ask'        => 'view',
+        'form'       => 'view',
+        'states'     => 'view',
+        'simulate'   => 'view',
+        'open'       => 'view',
+        'view'       => 'view',
+        'grid'       => 'view',
+        'output'     => 'view',
+        'column'     => 'view',
+        'check'      => 'view',
+        'test'       => 'view',
+        'search'     => 'view',
+        'export'     => 'view',
+        'display'    => 'view',
+        'render'     => 'view',
+        'load'       => 'view',
+        'refresh'    => 'view',
+        'top'        => 'view',
+    ];
+
+    /**
+     * Quel droit exige cette action ?
+     *
+     * @param string $action nom de l'action, sans le prefixe ajaxProcess
+     *
+     * @return string 'view', 'add', 'edit' ou 'delete'
+     */
+    public static function droitRequisPourAction($action) {
+
+        $nu = strtolower(preg_replace('/[^A-Za-z]/', '', (string) $action));
+
+        /* Le verbe le plus long qui commence la chaine l'emporte. */
+        $verbes = array_keys(static::$verbesDroits);
+
+        usort($verbes, function ($a, $b) {
+            return strlen($b) - strlen($a);
+        });
+
+        foreach ($verbes as $verbe) {
+
+            if (strpos($nu, $verbe) === 0) {
+                return static::$verbesDroits[$verbe];
+            }
+
+        }
+
+        return 'view';
+    }
+
+    /**
+     * L'employe courant peut-il declencher cette action ajax ?
+     *
+     * Rend true quand l'action doit se poursuivre. En mode blocage, un refus
+     * termine la requete par une reponse JSON — c'est du ajax, l'appelant
+     * attend du JSON, pas une page d'erreur.
+     *
+     * @param string $action
+     *
+     * @return bool
+     */
+    public function verifierDroitAjax($action) {
+
+        /* Pas de matrice chargee : on ne peut rien juger, on laisse passer. */
+
+        if (!is_array($this->tabAccess) || empty($this->tabAccess)) {
+            return true;
+        }
+
+        /* L'administrateur maitre n'est pas concerne. */
+
+        if (defined('_EPH_ADMIN_PROFILE_')
+            && isset($this->context->employee)
+            && (int) $this->context->employee->id_profile === (int) _EPH_ADMIN_PROFILE_) {
+            return true;
+        }
+
+        /*
+         * Derogations declarees par le controleur : certaines actions sont des
+         * utilitaires d'interface — remplir une liste deroulante, rafraichir un
+         * jeton — dont le nom ne dit rien de leur portee.
+         */
+
+        if (isset($this->ajaxRightsExceptions)
+            && is_array($this->ajaxRightsExceptions)
+            && in_array($action, $this->ajaxRightsExceptions, true)) {
+            return true;
+        }
+
+        $droit = static::droitRequisPourAction($action);
+
+        if (!empty($this->tabAccess[$droit])) {
+            return true;
+        }
+
+        $mode = 'observe';
+
+        if (isset($this->context->phenyxConfig)) {
+            $regle = $this->context->phenyxConfig->get('EPH_AJAX_RIGHTS_MODE');
+
+            if (!empty($regle)) {
+                $mode = (string) $regle;
+            }
+
+        }
+
+        $message = sprintf(
+            'Droits ajax [%s] : %s::%s exige « %s », profil %s ne l\'a pas',
+            $mode,
+            $this->controller_name,
+            $action,
+            $droit,
+            isset($this->context->employee) ? (int) $this->context->employee->id_profile : '?'
+        );
+
+        if ($mode !== 'enforce') {
+            /*
+             * Observation : on note et on laisse faire. Gravite 2 — ce n'est pas
+             * une erreur, c'est un releve destine a etre lu avant bascule.
+             */
+            PhenyxLogger::addLog($message, 2, null, $this->controller_name, null, true);
+
+            return true;
+        }
+
+        PhenyxLogger::addLog($message, 3, null, $this->controller_name, null, true);
+
+        /*
+         * ⚠️ la() et non l() : PhenyxController ne definit QUE la(). Le l() du
+         * front vient de FrontController, qui est une autre branche. Ecrire
+         * $this->l() ici aurait produit une erreur fatale — sur le chemin du
+         * refus, donc invisible tant qu'on reste en mode observation, et
+         * decouverte le jour de la bascule.
+         */
+        die(Tools::jsonEncode([
+            'success' => false,
+            'message' => $this->la('You do not have the necessary permission for this action.'),
+        ]));
+    }
+
+
+    /**
+     * Suppression generique appelee par deleteObject() de content/js/ephenyx.js.
+     *
+     * ─── LA CLASSE CIBLE VENAIT DU NAVIGATEUR ───
+     *
+     * La methode s'ecrivait ainsi :
+     *
+     *     $this->className = $this->context->_tools->getValue('targetClass');
+     *     $this->object = new $this->className($idObject);
+     *     $this->object->delete();
+     *
+     * « targetClass » etait pris tel quel dans la requete, sans aucune
+     * validation, et instancie. Or checkAccess() ne verifie que deux choses :
+     * que l'employe est connecte, et que le jeton est valide. Il ne regarde
+     * AUCUNE permission d'onglet — ni celle de l'ecran courant, ni a plus forte
+     * raison celle de la classe visee.
+     *
+     * N'importe quel employe connecte, quel que soit son profil, pouvait donc
+     * envoyer « targetClass=Employee », « targetClass=Profile »,
+     * « targetClass=Company » depuis n'importe quel ecran, et l'objet
+     * disparaissait.
+     *
+     * ─── LA CONSEQUENCE LA PLUS VISIBLE ───
+     *
+     * Le bouton « Supprimer ce profil » d'AdminProfiles appelle
+     * deleteObject('AdminProfiles', 'Profile', …), donc CETTE methode. La
+     * methode ajaxProcessDeleteProfile() du controleur, avec ses deux garde-fous
+     * — « on ne supprime pas le profil maitre », « on ne supprime pas un profil
+     * utilise » — n'etait jamais atteinte. Et Profile::delete() n'en a aucun.
+     * Le profil SuperAdmin etait donc supprimable depuis la grille, avec toutes
+     * ses permissions, sans possibilite de reparer ensuite.
+     *
+     * ─── CE QUI EST VERIFIE MAINTENANT ───
+     *
+     * 1. Le mode demonstration.
+     * 2. La permission de suppression sur l'onglet courant.
+     * 3. La classe cible : elle doit etre celle du controleur, ou figurer dans
+     *    $deletableClasses si le controleur en declare d'autres. Releve fait sur
+     *    les 56 appels a deleteObject() du depot le 2026-07-31 : tous passent
+     *    exactement $this->className. La regle ne casse donc rien, et elle
+     *    referme le detournement.
+     * 4. Que la classe existe et derive bien de PhenyxObjectModel.
+     * 5. Que l'objet s'est charge — supprimer un identifiant inexistant
+     *    annoncait le succes.
+     * 6. Le resultat reel de delete(), au lieu d'un succes systematique.
+     *
+     * @return void
+     */
+
     public function ajaxProcessDeleteObject() {
 
         $this->checkAccess();
-        $idObject = $this->context->_tools->getValue('idObject');
 
-        $this->className = $this->context->_tools->getValue('targetClass');
+        if (defined('_EPH_MODE_DEMO_') && _EPH_MODE_DEMO_) {
+            die($this->context->_tools->jsonEncode([
+                'success' => false,
+                'message' => $this->la('This functionality has been disabled.'),
+            ]));
+        }
 
+        if (isset($this->tabAccess['delete']) && $this->tabAccess['delete'] !== '1') {
+            die($this->context->_tools->jsonEncode([
+                'success' => false,
+                'message' => $this->la('You do not have permission to delete this.'),
+            ]));
+        }
+
+        $targetClass = (string) $this->context->_tools->getValue('targetClass');
+
+        $allowed = [$this->className];
+
+        if (property_exists($this, 'deletableClasses') && is_array($this->deletableClasses)) {
+            $allowed = array_merge($allowed, $this->deletableClasses);
+        }
+
+        if ($targetClass === '' || !in_array($targetClass, $allowed, true)) {
+            PhenyxLogger::addLog(
+                'ajaxProcessDeleteObject: refus de la classe « ' . $targetClass . ' » depuis ' . $this->controller_name,
+                2,
+                null,
+                $this->className,
+                null,
+                true
+            );
+
+            die($this->context->_tools->jsonEncode([
+                'success' => false,
+                'message' => $this->la('This object cannot be deleted from this screen.'),
+            ]));
+        }
+
+        if (!class_exists($targetClass) || !is_subclass_of($targetClass, 'EphenyxDigital\QuantumCore\PhenyxObjectModel')) {
+            die($this->context->_tools->jsonEncode([
+                'success' => false,
+                'message' => $this->la('This object cannot be deleted from this screen.'),
+            ]));
+        }
+
+        $idObject = (int) $this->context->_tools->getValue('idObject');
+
+        $this->className = $targetClass;
         $this->object = new $this->className($idObject);
 
-        $this->object->delete();
+        if (!Validate::isLoadedObject($this->object)) {
+            die($this->context->_tools->jsonEncode([
+                'success' => false,
+                'message' => $this->la('The object cannot be loaded.'),
+            ]));
+        }
+
+        if (!$this->object->delete()) {
+            die($this->context->_tools->jsonEncode([
+                'success' => false,
+                'message' => $this->la('An error occurred while deleting the object.'),
+            ]));
+        }
 
         $result = [
             'success' => true,
@@ -3326,6 +3813,24 @@ abstract class PhenyxController {
     public function ajaxProcessUpdateObject() {
 
         $this->checkAccess();
+
+        /*
+         * ⚠️ CELLE-CI ECRIT VRAIMENT. Le releve du 2026-08-03 a montre que la
+         * garde manquait sur les deux points d'ENREGISTREMENT — update et add —
+         * alors qu'elle existait sur l'ouverture du formulaire d'edition.
+         * Autrement dit : le refus d'ouvrir laissait croire a une protection
+         * qui n'existait pas au moment ou l'objet etait reellement modifie.
+         *
+         * L'ouverture du formulaire est cosmetique ; ce point-ci est le vrai.
+         */
+
+        if (empty($this->tabAccess['edit'])) {
+            die($this->context->_tools->jsonEncode([
+                'success' => false,
+                'message' => $this->la('Your administrative profile does not allow you to edit this object'),
+            ]));
+        }
+
         $has_keyword = $this->context->_tools->getValue('has_keyword');
         $idObject = $this->context->_tools->getValue($this->identifier);
         $this->object = new $this->className($idObject);
@@ -3357,6 +3862,16 @@ abstract class PhenyxController {
     public function ajaxProcessAddNewObject() {
 
         $this->checkAccess();
+
+        /* Le pendant en creation d'ajaxProcessUpdateObject : voir sa note. */
+
+        if (empty($this->tabAccess['add'])) {
+            die($this->context->_tools->jsonEncode([
+                'success' => false,
+                'message' => $this->la('Your administrative profile does not allow you to add this object'),
+            ]));
+        }
+
         $this->object = new $this->className();
 
         $this->copyFromPost($this->object, $this->table);
@@ -4401,6 +4916,33 @@ abstract class PhenyxController {
         return ['block' => $block, 'memory_usage' => memory_get_usage(), 'peak_memory_usage' => memory_get_peak_usage(), 'time' => microtime(true)];
     }
 
+    /**
+     * Le profilage est-il actif, au front ou au back-office ?
+     *
+     * ─── POURQUOI CETTE METHODE EXISTE (2026-08-07) ───
+     *
+     * L'ECRITURE du cache de page etait bien gardee par
+     * _EPH_ADMIN_DEBUG_PROFILING_ : en mode profilage, on ne mettait pas la
+     * page en cache. Mais la LECTURE ne l'etait pas. La page — rapport de
+     * profilage compris, puisqu'il voyage dans le meme tableau — pouvait donc
+     * etre servie depuis Redis.
+     *
+     * Consequence observee chez Jeff : apres correction de Configuration.php,
+     * le rapport affichait toujours 233 lectures de EPH_LANG_DEFAULT, au
+     * chiffre pres, rechargement complet compris — alors qu'une mesure en
+     * direct comptait ZERO requete pour trois cents lectures. On relisait un
+     * fossile mis en cache avant les corrections.
+     *
+     * Un profileur qui se sert lui-meme depuis le cache ne mesure rien.
+     *
+     * @return bool
+     */
+    protected function profilageActif() {
+
+        return (defined('_EPH_ADMIN_DEBUG_PROFILING_') && _EPH_ADMIN_DEBUG_PROFILING_)
+        || (defined('_EPH_DEBUG_PROFILING_') && _EPH_DEBUG_PROFILING_);
+    }
+
     private function getVarSize($var) {
 
         $start_memory = memory_get_usage();
@@ -4424,8 +4966,6 @@ abstract class PhenyxController {
     }
 
     protected function processProfilingData() {
-
-        global $start_time;
 
         // Including a lot of files uses memory
 
@@ -4538,12 +5078,12 @@ abstract class PhenyxController {
 
     protected function displayProfilingSummary() {
 
-        global $start_time;
-
+        // La soustraction de $start_time — inexistant, donc nulle — n'avait ici
+        // aucun effet : le chiffre etait juste, la variable inutile.
         $this->content_ajax .= '
         <div class="col-4">
             <table class="table table-condensed">
-                <tr><td>' . $this->la('Load time') . '</td><td>' . $this->getLoadTimeColor(round(microtime(true) - TIME_START, 3) - $start_time, true) . '</td></tr>
+                <tr><td>' . $this->la('Load time') . '</td><td>' . $this->getLoadTimeColor(round(microtime(true) - TIME_START, 3), true) . '</td></tr>
                 <tr><td>' . $this->la('Querying time') . '</td><td>' . $this->getTotalQueriyingTimeColor(round(1000 * $this->total_query_time)) . ' ms</span>
                 <tr><td>' . $this->la('Queries') . '</td><td>' . $this->getNbQueriesColor(count($this->array_queries)) . '</td></tr>
                 <tr><td>' . $this->la('Memory peak usage') . '</td><td>' . $this->getPeakMemoryColor($this->profiler[count($this->profiler) - 1]['peak_memory_usage']) . ' Mb</td></tr>
@@ -4580,13 +5120,24 @@ abstract class PhenyxController {
 
     protected function displayProfilingRun() {
 
-        global $start_time;
-
+        /*
+         * ⚠️ C'ETAIT `global $start_time`, UNE VARIABLE QUI N'EXISTE NULLE PART.
+         *
+         * Elle valait donc null, c'est-a-dire 0 dans une soustraction. La
+         * colonne « Temps cumule » affichait ainsi `microtime(true) - 0`, soit
+         * l'horodatage Unix brut multiplie par mille — les 1786124147960 ms
+         * releves par Jeff le 2026-08-06. La premiere ligne, « config »,
+         * heritait du meme defaut pour sa colonne « Temps ».
+         *
+         * Le repere reel est TIME_START, pose par index.php et rappele plus
+         * haut dans ce fichier ; c'est deja lui que le reste du noyau utilise
+         * pour calculer load_time.
+         */
         $this->content_ajax .= '
         <div class="col-4">
             <table class="table table-condensed">
                 <tr><th>&nbsp;</th><th>' . $this->la('Time') . '</th><th>' . $this->la('Cumulated Time') . '</th><th>' . $this->la('Memory Usage') . '</th><th>' . $this->la('Memory Peak Usage') . '</th></tr>';
-        $last = ['time' => $start_time, 'memory_usage' => 0];
+        $last = ['time' => TIME_START, 'memory_usage' => 0];
 
         foreach ($this->profiler as $row) {
 
@@ -4597,7 +5148,7 @@ abstract class PhenyxController {
             $this->content_ajax .= '<tr>
                 <td>' . $row['block'] . '</td>
                 <td>' . $this->getLoadTimeColor($row['time'] - $last['time']) . ' ms</td>
-                <td>' . $this->getLoadTimeColor($row['time'] - $start_time) . ' ms</td>
+                <td>' . $this->getLoadTimeColor($row['time'] - TIME_START) . ' ms</td>
                 <td>' . $this->getMemoryColor($row['memory_usage'] - $last['memory_usage']) . ' Mb</td>
                 <td>' . $this->getMemoryColor($row['peak_memory_usage']) . ' Mb</td>
             </tr>';
@@ -4611,7 +5162,19 @@ abstract class PhenyxController {
 
     protected function displayProfilingHooks() {
 
+        /*
+         * ⚠️ La session ne contient 'HookPerformance' que si des ancres ont
+         * ete exécutées ET mesurées. Sans le repli, count(null) est une
+         * TypeError fatale depuis PHP 8 — et sur ce serveur display_errors est
+         * actif, donc le rapport entier partait en fumee. C'est probablement
+         * pourquoi displayProfiling() avait fini tronquee juste avant l'appel
+         * de cette methode. Retabli le 2026-08-06.
+         */
         $perfs = $this->_session->get('HookPerformance');
+
+        if (!is_array($perfs)) {
+            $perfs = [];
+        }
 
         $count_hooks = count($perfs);
         $peformances = [];
@@ -4668,7 +5231,12 @@ abstract class PhenyxController {
 
     protected function displayProfilingPlugins() {
 
+        // Meme repli que displayProfilingHooks() : la clef peut ne pas exister.
         $perfs = $this->_session->get('pluginPerformance');
+
+        if (!is_array($perfs)) {
+            $perfs = [];
+        }
 
         $count_plugins = count($perfs);
         $peformances = [];
@@ -4741,6 +5309,15 @@ abstract class PhenyxController {
      */
     protected function displayProfilingStopwatch() {
 
+        /*
+         * ⚠️ La SIXIEME colonne contient le fichier et la ligne d'ou part la
+         * requete, pas une duree — elle s'intitulait pourtant « Time (ms) »,
+         * exactement comme la deuxieme. Deux colonnes de meme nom pour deux
+         * contenus differents : le tableau en devenait illisible. Renommee
+         * « Called from » le 2026-08-06.
+         *
+         * Le <tbody> ouvert plus bas n'etait pas refermé non plus.
+         */
         $this->content_ajax .= '
         <div id="stopwatch">
             <h2><a name="stopwatch">' . $this->la('Stopwatch SQL') . ' - ' . count($this->array_queries) . ' queries</a></h2>
@@ -4753,7 +5330,7 @@ abstract class PhenyxController {
                         <th style="width:10%">' . $this->la('Rows') . '</th>
                         <th style="width:5%">' . $this->la('Filesort') . '</th>
                         <th style="width:5%">' . $this->la('Group By') . '</th>
-                        <th style="width:20%">' . $this->la('Time (ms)') . '</th>
+                        <th style="width:20%">' . $this->la('Called from') . '</th>
                     </tr>
                 </thead>
                 <tbody>';
@@ -4776,9 +5353,7 @@ abstract class PhenyxController {
                 </tr>';
         }
 
-        $this->content_ajax .= '</table>
-
-
+        $this->content_ajax .= '</tbody></table>
         </div>';
     }
 
@@ -4885,11 +5460,38 @@ abstract class PhenyxController {
     public function displayProfiling() {
 
         $this->profiler[] = $this->stamp('display');
-        // Process all profiling data
         $this->processProfilingData();
 
-        // Add some specific style for profiling information
-        //$this->displayProfilingStyle();
+        /*
+         * ─── POURQUOI LE RAPPORT ETAIT VIDE (2026-08-06) ───
+         *
+         * Cette methode etait TRONQUEE : elle s'arretait apres
+         * displayProfilingObjectModel(), sans fermer ses balises et surtout
+         * SANS RETURN. Or tous ses appelants ecrivent
+         *
+         *     'profiling_report' => $this->displayProfiling()
+         *
+         * — AdminController l.2249, FrontController l.1369, et cinq
+         * contrôleurs de plugins. Ils recevaient donc null, et footer.tpl
+         * affichait un `#profiling_area` vide. Le bouton fonctionnait
+         * parfaitement : c'est le rapport qui n'existait pas.
+         *
+         * Trois manques a combler, et non un seul :
+         *
+         *  1. le return ;
+         *  2. les sections Hooks, Plugins et Included Files, dont
+         *     displayProfilingLinks() declare pourtant les onglets — ils
+         *     s'ouvraient donc sur du vide ;
+         *  3. la fermeture des quatre <div> encore ouverts.
+         *
+         * ⚠️ Les onze methodes displayProfiling*() ne retournent rien : elles
+         * ECRIVENT dans $this->content_ajax. Plutot que de les reecrire une a
+         * une, on detourne le tampon le temps du rapport, puis on le remet en
+         * place — content_ajax porte le contenu de la PAGE, y laisser le
+         * rapport l'injecterait dans la reponse ajax.
+         */
+        $tamponPage = $this->content_ajax;
+        $this->content_ajax = '';
 
         $this->content_ajax .= '<div id="phenyxshop_profiling" class="bootstrap">';
 
@@ -4908,5 +5510,28 @@ abstract class PhenyxController {
         if (isset(PhenyxObjectModel::$debug_list)) {
             $this->displayProfilingObjectModel();
         }
-}
+
+        // Les trois onglets annonces par displayProfilingLinks() et jamais
+        // rendus. Leurs deux premieres methodes lisent la session : le repli
+        // pose plus haut evite la TypeError de count(null) sur PHP 8.
+        $this->displayProfilingHooks();
+        $this->displayProfilingPlugins();
+        $this->displayProfilingFiles();
+
+        /*
+         * Quatre fermetures, dans l'ordre inverse de l'ouverture :
+         *   tabs-profilling-content  et  profiling_link  (displayProfilingLinks)
+         *   la seconde .row
+         *   phenyxshop_profiling
+         * Sans elles, jQuery UI ne trouvait pas de conteneur d'onglets bien
+         * forme et #profiling_link.tabs() restait sans effet.
+         */
+        $this->content_ajax .= '</div></div></div></div>';
+
+        $rapport = $this->content_ajax;
+        $this->content_ajax = $tamponPage;
+
+        return $rapport;
+    }
+
 }

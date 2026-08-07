@@ -140,14 +140,32 @@ class DbPDO extends Db {
      * @since 1.9.1.0
      * @version 1.8.1.0 Initial version
      */
+    /**
+     * Message de la derniere exception PDO attrapee.
+     *
+     * ⚠️ Indispensable : _query() attrape l'exception et rend false, mais
+     * getMsgError() interroge errorInfo() sur la CONNEXION — qui reste a
+     * « 00000 » puisque l'erreur portait sur la requete. L'appelant recevait
+     * donc « echec » avec un message VIDE, et devait aller fouiller le journal.
+     *
+     * Constate le 2026-07-30 sur une restauration de sauvegarde : « statement
+     * 181 failed:  » sans autre indication, alors que la cause etait ecrite
+     * dans les journaux.
+     */
+    protected $lastExceptionMessage = '';
+
     protected function _query($sql) {
 
         try {
+            $this->lastExceptionMessage = '';
+
             return isset($this->link) ? $this->link->query($sql) : null;
         } catch (PDOException $e) {
             // Fix: PDO throws PDOException, not PhenyxException.
             // The original catch block would never trigger on a PDO error.
+            $this->lastExceptionMessage = $e->getMessage();
             PhenyxLogger::addLog('PDO query error: ' . $e->getMessage() . ' for query: ' . $sql, 4);
+
             return false;
         }
 
@@ -257,7 +275,13 @@ class DbPDO extends Db {
 
         $error = $this->link->errorInfo();
 
-        return ($error[0] == '00000') ? '' : $error[2];
+        if ($error[0] != '00000' && !empty($error[2])) {
+            return $error[2];
+        }
+
+        // Repli sur l'exception attrapee par _query() : c'est la, et seulement
+        // la, que se trouve le motif d'un echec de requete sous PDO.
+        return $this->lastExceptionMessage;
     }
 
     /**
