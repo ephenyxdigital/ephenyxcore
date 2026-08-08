@@ -5,6 +5,7 @@ namespace EphenyxDigital\QuantumCore;
 
 abstract class ComposerShortCodeAbstract {
 
+	
 	public static $config;
 	public $context;
 	protected $is_plugin = true;
@@ -31,7 +32,7 @@ abstract class ComposerShortCodeAbstract {
 		}
 
 	}
-
+	
 	public function init($settings) {
 
 		self::$config = (array) $settings;

@@ -455,16 +455,50 @@ class Configuration extends PhenyxObjectModel {
          *
          * Une requete par requete HTTP : c'est le bon compromis, et cela reste
          * une requete au lieu de sept cent vingt-sept.
+         *
+         * ─── MAIS CETTE REQUETE RAMENAIT 17 677 LIGNES (2026-08-08) ───
+         *
+         * La jointure ne filtrait aucune langue : elle rapportait le produit
+         * de toutes les clefs par les ONZE langues installees. Releve du
+         * profilage : 1667 ms au premier appel, 475 ms au second, soit 57 %
+         * du temps SQL de la page.
+         *
+         * En retirant l'instantane de session j'avais rendu la methode juste,
+         * mais je l'avais condamnee a payer ce volume A CHAQUE REQUETE HTTP,
+         * alors que la session l'amortissait sur toute la visite. Un defaut
+         * de justesse remplace par un defaut de volume.
+         *
+         * On ne charge donc plus que ce qui sert vraiment : les valeurs NON
+         * traduites (id_lang NULL, rangees sous l'indice 0) et celles de la
+         * SEULE langue courante. Onze fois moins de lignes.
+         *
+         * Les autres langues restent accessibles : get($clef, $autreLangue)
+         * ne les trouvera pas dans le tableau et retombera sur la requete
+         * unitaire de secours, qui met son resultat en cache. C'est le bon
+         * arbitrage — demander une clef dans une langue qui n'est pas celle
+         * de l'employe est rare, la servir a chaque page ne l'etait pas.
          */
         static::$_cache['configuration'] = [];
         static::$chargementComplet = false;
 
-        $rows = Db::getInstance()->executeS(
-            (new DbQuery())
-                ->select('c.`name`, cl.`id_lang`, IFNULL(cl.`value_lang`, c.`value`) AS `value`')
-                ->from('configuration', 'c')
-                ->leftJoin('configuration_lang', 'cl', 'c.`id_configuration` = cl.`id_configuration`')
-        );
+        $idLangCourante = 0;
+
+        if (isset($this->context->language) && isset($this->context->language->id)) {
+            $idLangCourante = (int) $this->context->language->id;
+        }
+
+        $requete = (new DbQuery())
+            ->select('c.`name`, cl.`id_lang`, IFNULL(cl.`value_lang`, c.`value`) AS `value`')
+            ->from('configuration', 'c')
+            ->leftJoin('configuration_lang', 'cl', 'c.`id_configuration` = cl.`id_configuration`');
+
+        if ($idLangCourante > 0) {
+            // IS NULL conserve les clefs non traduites, que le LEFT JOIN
+            // ramene sans ligne correspondante.
+            $requete->where('cl.`id_lang` IS NULL OR cl.`id_lang` = ' . $idLangCourante);
+        }
+
+        $rows = Db::getInstance()->executeS($requete);
 
         if (!is_array($rows)) {
             // Echec de lecture : on ne pretend surtout pas au chargement

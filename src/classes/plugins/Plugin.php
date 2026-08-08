@@ -3552,6 +3552,9 @@ abstract class Plugin {
 
     public function unregisterExceptions($hookId) {
 
+        // La table change : le cache statique doit repartir de zero.
+        static::oublierExceptionsAncres();
+
         return Db::getInstance()->delete(
             'hook_plugin_exceptions',
             '`id_plugin` = ' . (int) $this->id . ' AND `id_hook` = ' . (int) $hookId
@@ -3570,6 +3573,9 @@ abstract class Plugin {
         if (!$result) {
             return false;
         }
+
+        // Idem : la table vient de changer.
+        static::oublierExceptionsAncres();
 
         $this->_session->removeStartingKey('getExceptions_' . $idHook);
 
@@ -3692,20 +3698,58 @@ abstract class Plugin {
         return $output;
     }
 
-    public function getExceptions($idHook, $dispatch = false) {
+    /**
+     * Table des exceptions d'ancres, indexee par « idHook-idPlugin ».
+     *
+     * @var array|null null tant qu'elle n'a pas ete lue
+     */
+    protected static $exceptionsAncres = null;
 
-        $array_return = PhenyxSession::getInstance()->get('getExceptions_' . $idHook . '_' . $dispatch);
+    /**
+     * Lit une seule fois par requete la table des exceptions.
+     *
+     * ─── POURQUOI CE CACHE (2026-08-08) ───
+     *
+     * getExceptions() et getExceptionsStatic() relisaient TOUTE la table a
+     * chaque appel — `SELECT * FROM hook_plugin_exceptions` — pour n'en
+     * extraire qu'une seule clef. Releve du profilage : 49 lectures completes
+     * par page. Sur une base distante a 8,66 ms l'aller-retour, c'est 0,42
+     * seconde pour un tableau qui ne change qu'a l'installation d'un plugin.
+     *
+     * Un cache de session existait, et il etait mort-ne pour deux raisons :
+     *
+     *  1. `!empty($array_return)` — or le resultat est presque toujours un
+     *     tableau VIDE, la plupart des ancres n'ayant aucune exception. Le
+     *     cache etait donc repute absent a chaque fois. Exactement le meme
+     *     defaut que Configuration::get(), corrige la veille.
+     *
+     *  2. ⚠️ La clef « getExceptions_{idHook}_{dispatch} » NE CONTENAIT PAS
+     *     l'identifiant du plugin, alors que le resultat en depend
+     *     ($key = $idHook . '-' . $this->id). Si ce cache avait fonctionne, il
+     *     aurait servi les exceptions d'un plugin pour un autre. Il valait
+     *     mieux qu'il echoue.
+     *
+     * D'ou un cache STATIQUE, correctement indexe, mort en fin de requete.
+     *
+     * @return array
+     */
+    protected static function chargerExceptionsAncres() {
 
-        if (!empty($array_return) && is_array($array_return)) {
-            return $array_return;
+        if (is_array(static::$exceptionsAncres)) {
+            return static::$exceptionsAncres;
         }
 
-        $exceptions_cache = [];
+        static::$exceptionsAncres = [];
+
         $result = Db::getInstance(_EPH_USE_SQL_SLAVE_)->executeS(
             (new DbQuery())
                 ->select('*')
                 ->from('hook_plugin_exceptions')
         );
+
+        if (!is_array($result)) {
+            return static::$exceptionsAncres;
+        }
 
         foreach ($result as $row) {
 
@@ -3715,104 +3759,47 @@ abstract class Plugin {
 
             $key = $row['id_hook'] . '-' . $row['id_plugin'];
 
-            if (!isset($exceptions_cache[$key])) {
-                $exceptions_cache[$key] = [];
+            if (!isset(static::$exceptionsAncres[$key])) {
+                static::$exceptionsAncres[$key] = [];
             }
 
-            $exceptions_cache[$key][] = $row['file_name'];
+            static::$exceptionsAncres[$key][] = $row['file_name'];
         }
 
-        $key = $idHook . '-' . $this->id;
-        $array_return = [];
+        return static::$exceptionsAncres;
+    }
 
-        if ($dispatch) {
+    /**
+     * A appeler apres toute ecriture dans hook_plugin_exceptions.
+     */
+    public static function oublierExceptionsAncres() {
 
-            // Fix #11: original was isset($exceptions_cache[$key], $exceptions_cache[$key])
-            // — checking the same key twice is redundant. Simplified to single check.
-            if (isset($exceptions_cache[$key])) {
-                $array_return = $exceptions_cache[$key];
-            }
+        static::$exceptionsAncres = null;
+    }
 
-        } else {
+    public function getExceptions($idHook, $dispatch = false) {
 
-            if (isset($exceptions_cache[$key]) && is_array($exceptions_cache[$key])) {
-
-                foreach ($exceptions_cache[$key] as $file) {
-
-                    if (!in_array($file, $array_return)) {
-                        $array_return[] = $file;
-                    }
-
-                }
-
-            }
-
-        }
-
-        PhenyxSession::getInstance()->set('getExceptions_' . $idHook . '_' . $dispatch, $array_return);
-
-        return $array_return;
+        return static::getExceptionsStatic($this->id, $idHook, $dispatch);
     }
 
     public static function getExceptionsStatic($id_plugin, $id_hook, $dispatch = false) {
 
-        $result = PhenyxSession::getInstance()->get('getExceptions_' . $id_hook . '_' . $dispatch);
-
-        if (!empty($result) && is_array($result)) {
-            return $result;
-        }
-
-        $exceptions_cache = [];
-        $result = Db::getInstance(_EPH_USE_SQL_SLAVE_)->executeS(
-            (new DbQuery())
-                ->select('*')
-                ->from('hook_plugin_exceptions')
-        );
-
-        foreach ($result as $row) {
-
-            if (!$row['file_name']) {
-                continue;
-            }
-
-            $key = $row['id_hook'] . '-' . $row['id_plugin'];
-
-            if (!isset($exceptions_cache[$key])) {
-                $exceptions_cache[$key] = [];
-            }
-
-            $exceptions_cache[$key][] = $row['file_name'];
-        }
+        // cf. chargerExceptionsAncres() : une lecture par requete, pas une par
+        // appel. Le cache de session est supprime — sa clef ignorait le plugin.
+        $exceptions_cache = static::chargerExceptionsAncres();
 
         $key = $id_hook . '-' . $id_plugin;
-        $array_return = [];
 
-        if ($dispatch) {
-
-            // Fix #11: same redundant isset($key, $key) as in getExceptions() — fixed.
-            if (isset($exceptions_cache[$key])) {
-                $array_return = $exceptions_cache[$key];
-            }
-
-        } else {
-
-            if (isset($exceptions_cache[$key]) && is_array($exceptions_cache[$key])) {
-
-                foreach ($exceptions_cache[$key] as $file) {
-
-                    if (!in_array($file, $array_return)) {
-                        $array_return[] = $file;
-                    }
-
-                }
-
-            }
-
+        if (!isset($exceptions_cache[$key]) || !is_array($exceptions_cache[$key])) {
+            return [];
         }
 
-        PhenyxSession::getInstance()->set('getExceptions_' . $id_hook . '_' . $dispatch, $array_return);
+        if ($dispatch) {
+            return $exceptions_cache[$key];
+        }
 
-        return $array_return;
+        // Hors dispatch, on dedoublonne les noms de fichiers.
+        return array_values(array_unique($exceptions_cache[$key]));
     }
 
     public function isEnabledForShopContext() {

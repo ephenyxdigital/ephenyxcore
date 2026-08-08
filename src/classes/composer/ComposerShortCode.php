@@ -36,6 +36,7 @@ abstract class ComposerShortCode extends ComposerShortCodeAbstract {
 		}
 
 	}
+	
 
 	public function getShortcode() {
 

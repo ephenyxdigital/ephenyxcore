@@ -429,7 +429,35 @@ class PhenyxCollection implements Iterator, ArrayAccess, Countable {
 		
         
         if (!empty($this->definition['have_meta'])) {
-            $this->query->select($alias.'.*,'.implode(', ', $this->definition['have_meta']['field']));
+
+            /*
+             * ═══ « SELECT a0.*, FROM » ═══ corrige le 2026-08-08.
+             *
+             * Cette ligne lisait $this->definition['have_meta']['field'] : une
+             * cle qui n'existe dans AUCUNE definition. Partout ailleurs dans le
+             * noyau — PhenyxObjectModel l. 519, 971, 1090, 1221, 1254 —
+             * `have_meta` est un simple BOOLEEN, et le SELECT se contente
+             * d'ajouter l'alias de la table meta (`$sql->select('c.*')`).
+             *
+             * L'expression ne rendant rien d'exploitable, la concatenation
+             * produisait « a0.*, » — virgule traînante, liste de champs vide —
+             * et MariaDB refusait la requete :
+             *
+             *   SELECT a0.*,
+             *   FROM `eph_product` a0
+             *   LEFT JOIN `eph_product_meta` `m` ON ...
+             *
+             * Toute collection portant have_meta etait donc inutilisable :
+             * Product, Combination, User, Guest. Le symptome remontait en
+             * production par ProductFamily::applyToProducts(), qui parcourt
+             * une PhenyxCollection('Product') pour realigner les articles
+             * d'une famille apres modification d'un prix specifique.
+             *
+             * On s'aligne sur le reste du noyau : deux SELECT distincts, que
+             * DbQuery assemble lui-meme avec les separateurs qu'il faut.
+             */
+            $this->query->select($alias . '.*');
+            $this->query->select(static::META_ALIAS . '.*');
             $this->query->leftJoin($this->definition['table'].'_meta', static::META_ALIAS, $alias. '.`'.$this->definition['primary'] .'` = '.static::META_ALIAS.'.`'.$this->definition['primary'].'`');
         }
 		

@@ -329,14 +329,36 @@ abstract class PhenyxObjectModel implements Core_Foundation_Database_EntityInter
 
         if (_EPH_DEBUG_PROFILING_ || _EPH_ADMIN_DEBUG_PROFILING_) {
 
+            /*
+             * ⚠️ CE BLOC EST TRES COUTEUX — ET IL ETAIT EN PLUS FAUTIF.
+             *
+             * 1. Il lisait $this->classname, TOUT EN MINUSCULES, alors que la
+             *    propriete declaree ligne 175 est $className. La lecture
+             *    renvoyait donc null, et self::$debug_list[null] produisait un
+             *    « Deprecated: Using null as an array offset » A CHAQUE
+             *    INSTANCIATION D'OBJET. Sur une page qui en cree des milliers,
+             *    ce sont des milliers de messages formates puis journalises.
+             *    Corrige le 2026-08-08.
+             *
+             * 2. debug_backtrace() SANS ARGUMENT capture la pile complete AVEC
+             *    les arguments de chaque appel — objets compris. C'est l'appel
+             *    le plus cher de PHP, et il partait a chaque construction
+             *    d'objet. On le borne desormais : DEBUG_BACKTRACE_IGNORE_ARGS
+             *    et une profondeur de 8, largement suffisante pour remonter au
+             *    premier appelant hors modele.
+             *
+             * ⚠️ Rappel : tout ceci ne s'execute que si le profilage est actif.
+             * Un profileur qui alourdit chaque objet fausse ce qu'il mesure —
+             * ne laissez PAS _EPH_ADMIN_DEBUG_PROFILING_ a true en service.
+             */
             $this->className = get_class($this);
 
-            if (!isset(self::$debug_list[$this->classname])) {
-                self::$debug_list[$this->classname] = [];
+            if (!isset(self::$debug_list[$this->className])) {
+                self::$debug_list[$this->className] = [];
             }
 
-            $class_list = ['PhenyxObjectModel', $this->classname, $this->classname . 'Core'];
-            $backtrace = debug_backtrace();
+            $class_list = ['PhenyxObjectModel', $this->className, $this->className . 'Core'];
+            $backtrace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 8);
 
             foreach ($backtrace as $trace_id => $row) {
 

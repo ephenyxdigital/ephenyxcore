@@ -1713,9 +1713,12 @@ class Composer {
 
     }
 
-    public function l($string, $idLang = null, $context = null) {
+    public function l($string, $class = null, $idLang = null, $context = null) {
 
-        $class = Composer::class;
+		if(is_null($class)) {
+			 $class = Composer::class;
+		}
+       
 
         if (!isset($this->context)) {
             $this->context = Context::getContext();
