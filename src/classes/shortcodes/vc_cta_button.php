@@ -10,7 +10,7 @@ extract(Composer::shortcode_atts([
 	'size'          => '',
 	'target'        => '',
 	'href'          => '',
-	'title'         => $this->l('Text on the button'),
+	'title'         => $vc_manager->l('Text on the button', 'ComposerShortCodeAbstract'),
 	'call_text'     => '',
 	'position'      => 'cta_align_right',
 	'el_class'      => '',

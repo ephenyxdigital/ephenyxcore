@@ -12,6 +12,6 @@ $css_class = 'twitter-share-button';
 $ssl_enable = $this->context->phenyxConfig->get('EPH_SSL_ENABLED');
 $base = ($ssl_enable == 1) ? 'https://' : 'http://';
 
-$output = '<a href="' . $base . 'twitter.com/share" class="' . $css_class . '" data-count="' . $type . '">' . ephenyx_manager()->l("Tweet", "js_composer") . '</a><script type="text/javascript" src="' . $base . 'platform.twitter.com/widgets.js"></script>' . $this->endBlockComment('tweetmeme') . "\n";
+$output = '<a href="' . $base . 'twitter.com/share" class="' . $css_class . '" data-count="' . $type . '">' . ephenyx_manager()->l('Tweet', 'ComposerShortCodeAbstract') . '</a><script type="text/javascript" src="' . $base . 'platform.twitter.com/widgets.js"></script>' . $this->endBlockComment('tweetmeme') . "\n";
 
 echo $output;

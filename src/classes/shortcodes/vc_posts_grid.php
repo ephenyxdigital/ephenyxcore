@@ -85,7 +85,7 @@ if ($filter === 'yes' && !empty($this->filter_categories)):
 	$categories_array = $this->getFilterCategories();
 	?>
 				<ul class="categories_filter vc_col-sm-12 vc_clearfix">
-					<li class="active"><a href="#" data-filter="*"><?php echo $this->l('All') ?></a></li>
+					<li class="active"><a href="#" data-filter="*"><?php echo $vc_manager->l('All', 'ComposerShortCodeAbstract') ?></a></li>
 					<?php
 	foreach ($this->getFilterCategories() as $cat): ?>
 					<li><a href="#"
@@ -120,7 +120,7 @@ foreach ($blocks_to_build as $block_data): ?>
 					</li> <?php echo $this->endBlockComment('single teaser'); ?>
 					<?php endforeach;?>
 				<?php else: ?>
-				<li class="<?php echo $this->spanClass(1); ?>"><?php echo $this->l('Nothing found.') ?></li>
+				<li class="<?php echo $this->spanClass(1); ?>"><?php echo $vc_manager->l('Nothing found.', 'ComposerShortCodeAbstract') ?></li>
 				<?php endif;?>
 			</ul>
 		</div>
