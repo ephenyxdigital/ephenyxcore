@@ -26,6 +26,33 @@ class Hook extends PhenyxObjectModel {
 
     protected static $_available_plugins_cache = null;
 
+    /**
+     * Numero de version des clefs de cache des ancres.
+     *
+     * ═══ POURQUOI (2026-08-09) ═══
+     *
+     * Installer un plugin, le reinitialiser ou deplacer une ancre ne se voyait
+     * qu'apres un vidage complet du cache : les trois familles de clefs ci-
+     * dessous vivent 1 864 000 secondes, soit trois semaines.
+     *
+     *   getPlugins<id_hook>              les plugins accroches a une ancre
+     *   getPluginHooks_<id_plugin>       les ancres d'un plugin
+     *   hook_plugin_exec_list_<ancre>    la liste d'execution, par utilisateur
+     *
+     * On ne les EFFACE pas : la troisieme se decline par utilisateur, elle est
+     * donc inenumerable, et sur Redis cleanCache() ignore le prefixe pour faire
+     * un flushDB() — vider toute la base a chaque changement d'ancre
+     * reintroduirait la lenteur corrigee en aout 2026.
+     *
+     * On change leur NOM. Les clefs portent un numero de version ; l'incrementer
+     * rend d'un coup toutes les anciennes inaccessibles, et elles expirent
+     * seules. Invalidation instantanee, aucun effacement, aucun parcours.
+     */
+    protected static $versionCache = null;
+
+    /** Clef de configuration portant ce numero. */
+    const CLEF_VERSION_CACHE = 'EPH_HOOK_CACHE_VERSION';
+
     public $name;
 
     public $target;
@@ -137,7 +164,7 @@ class Hook extends PhenyxObjectModel {
         $context = Context::getContext();
 
         if ($use_cache && $context->cache_enable && is_object($context->cache_api)) {
-            $value   = $context->cache_api->getData('getPlugins' . $id_hook);
+            $value   = $context->cache_api->getData('getPlugins' . $id_hook . static::suffixeCache());
             $plugins = empty($value) ? null : $context->_tools->jsonDecode($value, true);
 
             if (!empty($plugins) && is_array($plugins)) {
@@ -199,7 +226,7 @@ class Hook extends PhenyxObjectModel {
 
         if ($context->cache_enable && is_object($context->cache_api)) {
             $temp = $context->_tools->jsonEncode($plugins);
-            $context->cache_api->putData('getPlugins' . $id_hook, $temp, 1864000);
+            $context->cache_api->putData('getPlugins' . $id_hook . static::suffixeCache(), $temp, 1864000);
         }
 
         return $plugins;
@@ -212,6 +239,73 @@ class Hook extends PhenyxObjectModel {
         }
 
         return static::$hook_instance;
+    }
+
+    /**
+     * Suffixe de version a coller aux clefs de cache des ancres.
+     *
+     * Lu une fois par requete. Sans configuration disponible — tres tot dans
+     * l'amorcage — on rend une chaine vide : le cache se comporte alors comme
+     * avant, ce qui est preferable a une clef instable.
+     *
+     * @return string
+     */
+    public static function suffixeCache() {
+
+        if (static::$versionCache !== null) {
+            return static::$versionCache;
+        }
+
+        static::$versionCache = '';
+
+        if (class_exists('Configuration')) {
+            $version = Configuration::getInstance()->get(static::CLEF_VERSION_CACHE);
+
+            if (!empty($version)) {
+                static::$versionCache = '_v' . (int) $version;
+            }
+
+        }
+
+        return static::$versionCache;
+    }
+
+    /**
+     * Rend caduc tout le cache des ancres, sans rien effacer.
+     *
+     * A appeler des qu'une ancre change de contenu : installation,
+     * desinstallation ou reinitialisation d'un plugin, accrochage ou
+     * decrochage, changement de position, ajout ou retrait d'une exception.
+     *
+     * L'increment est immediat pour TOUS les processus, puisque le numero vit
+     * en configuration. Les anciennes entrees ne sont plus lues et s'effacent
+     * d'elles-memes a l'expiration.
+     *
+     * @return bool
+     */
+    public static function invaliderCaches() {
+
+        if (!class_exists('Configuration')) {
+            return false;
+        }
+
+        $config  = Configuration::getInstance();
+        $version = (int) $config->get(static::CLEF_VERSION_CACHE);
+        $config->updateValue(static::CLEF_VERSION_CACHE, $version + 1);
+
+        // Le processus courant doit voir la nouvelle valeur sans relire la base.
+        static::$versionCache = '_v' . ($version + 1);
+
+        // Caches statiques du meme processus : ils ne portent pas de clef.
+        static::$_available_plugins_cache = null;
+        static::$executed_hooks           = [];
+
+        PhenyxLogger::addLog(
+            'Hook : cache des ancres invalide (version ' . ($version + 1) . ')',
+            1, null, 'Hook', null, true
+        );
+
+        return true;
     }
 
     public function add($autoDate = true, $nullValues = false) {
@@ -297,7 +391,7 @@ class Hook extends PhenyxObjectModel {
     public function getPluginHooks($id_plugin = 0, $use_cache = true) {
 
         if ($use_cache && $this->context->cache_enable && is_object($this->context->cache_api)) {
-            $value = $this->context->cache_api->getData('getPluginHooks_' . $id_plugin);
+            $value = $this->context->cache_api->getData('getPluginHooks_' . $id_plugin . static::suffixeCache());
             $hooks = empty($value) ? null : $this->context->_tools->jsonDecode($value, true);
 
             if (!empty($hooks) && is_array($hooks)) {
@@ -332,7 +426,7 @@ class Hook extends PhenyxObjectModel {
         // Using only the cache API (faster, TTL-controlled).
         if ($this->context->cache_enable && is_object($this->context->cache_api)) {
             $temp = $this->context->_tools->jsonEncode($hooks);
-            $this->context->cache_api->putData('getPluginHooks_' . $id_plugin, $temp, 1864000);
+            $this->context->cache_api->putData('getPluginHooks_' . $id_plugin . static::suffixeCache(), $temp, 1864000);
         }
 
         return $hooks;
@@ -729,7 +823,7 @@ class Hook extends PhenyxObjectModel {
         $cacheId = null;
 
         if ($this->context->cache_enable && is_object($this->context->cache_api)) {
-            $cacheId = 'hook_plugin_exec_list_' . $hookName . ((isset($this->context->user->id)) ? '_' . $this->context->user->id : '');
+            $cacheId = 'hook_plugin_exec_list_' . $hookName . ((isset($this->context->user->id)) ? '_' . $this->context->user->id : '') . static::suffixeCache();
             $value   = $this->context->cache_api->getData($cacheId, 3600);
             $temp    = empty($value) ? null : Tools::jsonDecode($value, true);
 

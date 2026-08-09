@@ -81,8 +81,8 @@ class PhenyxAssistant {
      *           return null;
      *       }
      *       return [
-     *           'text'         => '<br /><br />' . $this->l('...'),
-     *           'quickReplies' => [$this->l('How Search Works?')],
+     *           'text'         => '<br /><br />' . $this->l("..."),
+     *           'quickReplies' => [$this->l("How Search Works?")],
      *       ];
      *   }
      *

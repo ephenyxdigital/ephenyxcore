@@ -3341,6 +3341,9 @@ abstract class Plugin {
             return $result;
         }
 
+        // Les ancres viennent de changer : le cache doit suivre.
+        Hook::invaliderCaches();
+
         return true;
     }
 
@@ -3532,6 +3535,9 @@ abstract class Plugin {
             }
         }
 
+        // Les ancres viennent de changer : le cache doit suivre.
+        Hook::invaliderCaches();
+
         return $return;
     }
 
@@ -3554,6 +3560,9 @@ abstract class Plugin {
 
         // La table change : le cache statique doit repartir de zero.
         static::oublierExceptionsAncres();
+
+        // Les ancres viennent de changer : le cache doit suivre.
+        Hook::invaliderCaches();
 
         return Db::getInstance()->delete(
             'hook_plugin_exceptions',
@@ -3578,6 +3587,9 @@ abstract class Plugin {
         static::oublierExceptionsAncres();
 
         $this->_session->removeStartingKey('getExceptions_' . $idHook);
+
+        // Les ancres viennent de changer : le cache doit suivre.
+        Hook::invaliderCaches();
 
         return true;
     }
@@ -3630,6 +3642,9 @@ abstract class Plugin {
         if (!Db::getInstance()->execute($sql)) {
             return false;
         }
+
+        // Les ancres viennent de changer : le cache doit suivre.
+        Hook::invaliderCaches();
 
         return true;
     }

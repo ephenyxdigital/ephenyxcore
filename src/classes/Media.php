@@ -917,6 +917,17 @@ class Media {
 
     public function deferTagOutput($tag, $output) {
 
+        /*
+         * PHP 8 : loadHTML('') leve un ValueError « Argument #1 ($source) must
+         * not be empty », qui remonte en page d'exception. Or une chaine vide
+         * n'a rien d'anormal ici : elle signifie simplement qu'il n'y a rien a
+         * extraire. On rend '' — ce que fait deja la sortie « balise absente »
+         * plus bas — au lieu d'interrompre l'ecran.
+         */
+        if (!is_string($output) || trim($output) === '') {
+            return '';
+        }
+
         $dom = new DOMDocument();
         libxml_use_internal_errors(true);
         @$dom->loadHTML(($output));
@@ -935,6 +946,11 @@ class Media {
     }
 
     public function deferIdOutput($tag, $output) {
+
+        // Meme garde que deferTagOutput() : pas de contenu, pas de fragment.
+        if (!is_string($output) || trim($output) === '') {
+            return '';
+        }
 
         $dom = new DOMDocument();
         libxml_use_internal_errors(true);
@@ -1030,11 +1046,41 @@ class Media {
 
         }
 
+        /*
+         * ⚠️ preg_replace_callback() rend NULL en cas d'echec du moteur PCRE —
+         * typiquement un depassement de pcre.backtrack_limit. Le motif
+         * $pattern_js contient « (.*) » en mode dotall : sur une page riche en
+         * balises <script>, ou dont l'une n'est pas refermee, le cout de
+         * retour arriere explose et le moteur abandonne.
+         *
+         * Le retour etait renvoye tel quel : TOUT le HTML de l'ecran
+         * disparaissait d'un coup. L'appelant, ajaxShowEditContent(), passait
+         * ensuite ce vide a deferTagOutput() — d'ou le ValueError de
+         * DOMDocument::loadHTML() qui a fait surface sur l'edition d'un
+         * abonnement, tres loin de la vraie cause.
+         *
+         * On ne rend jamais moins que ce qu'on a recu : a defaut de pouvoir
+         * differer les scripts, l'ecran s'affiche avec ses scripts en place.
+         */
         // @codingStandardsIgnoreStart
-        $output = preg_replace_callback(Media::$pattern_js, [$this, 'deferScript'], $output);
+        $transforme = preg_replace_callback(Media::$pattern_js, [$this, 'deferScript'], $output);
         // @codingStandardsIgnoreEnd
 
-        return $output;
+        if ($transforme === null) {
+            PhenyxLogger::addLog(
+                'Media::deferInlineScripts : PCRE a abandonne (' . preg_last_error_msg()
+                . ') sur ' . strlen($output) . ' octets — scripts non differes.',
+                2,
+                null,
+                'Media',
+                null,
+                true
+            );
+
+            return $output;
+        }
+
+        return $transforme;
     }
 
     public function deferScript($matches) {
