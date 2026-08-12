@@ -299,6 +299,12 @@ class PhenyxAutoload {
 
         } catch (\Exception $e) {
             // DB not yet available (e.g. first install) — return empty list.
+            // Log it: any SQL failure here (missing column, partial import,
+            // insufficient grants) silently disables plugin class indexing and
+            // reproduces the "Undefined class 'Cart'" symptom of Fix #14, with
+            // nothing in the logs to point at the cause.
+            @error_log('[PhenyxAutoload] plugin class indexing disabled: ' . $e->getMessage());
+
             return [];
         }
     }
@@ -334,11 +340,19 @@ class PhenyxAutoload {
             new RecursiveDirectoryIterator($pluginDir, RecursiveDirectoryIterator::SKIP_DOTS)
         );
 
+        // Fix #14 (portability): SplFileInfo::getPathname() joins path segments
+        // with the platform separator, i.e. a backslash on Windows. The strpos()
+        // directory tests below ('classes/', 'controllers/admin/', ...) then never
+        // match and NOT A SINGLE plugin class gets indexed. Normalising every
+        // separator to '/' before comparing is a strict no-op under Linux.
+        $pluginDirNorm = str_replace('\\', '/', $pluginDir);
+        $rootDirNorm   = str_replace('\\', '/', _EPH_ROOT_DIR_);
+
         $namespacePattern = '[\\a-z0-9_]*[\\]';
 
         foreach ($iterator as $fileInfo) {
             /** @var SplFileInfo $fileInfo */
-            $filePath = $fileInfo->getPathname();
+            $filePath = str_replace('\\', '/', $fileInfo->getPathname());
             $fileName = $fileInfo->getFilename();
 
             if (in_array($fileName, $skipList, true)) {
@@ -346,7 +360,10 @@ class PhenyxAutoload {
             }
 
             // Only index classes/ and controllers/admin|front/ — skip overrides
-            $relativePath = str_replace($pluginDir, '', $filePath);
+            // Fix #14: compare against the normalised plugin dir, otherwise the
+            // trailing '/' of $pluginDir never lines up with the '\' produced by
+            // the iterator and str_replace() strips nothing.
+            $relativePath = str_replace($pluginDirNorm, '', $filePath);
 
             if (strpos($relativePath, 'override/') !== false) {
                 continue;
@@ -379,7 +396,11 @@ class PhenyxAutoload {
 
             // Fix #3: original did `$file = str_replace(...)` which overwrote the
             // SplFileInfo loop variable. Using a separate $classPath variable.
-            $classPath = str_replace(_EPH_ROOT_DIR_, '', $filePath);
+            // Fix #14: strip against the normalised root, and drop the leading
+            // slash so the stored path matches the format used by
+            // getClassesFromDir() ('includes/classes/Address.php'). load() then
+            // builds `$this->root_dir . $path` without a doubled slash.
+            $classPath = ltrim(str_replace($rootDirNorm, '', $filePath), '/');
 
             $classes[$m['classname']] = [
                 'path'     => $classPath,

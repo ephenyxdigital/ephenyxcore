@@ -45,6 +45,30 @@ class FileBased extends CacheApi implements CacheApiInterface {
 		return parent::isSupported() && $supported;
 	}
 
+	/**
+	 * Turn a cache key into a safe file name fragment.
+	 *
+	 * Fix #16: the previous inline `strtr($key, ':/', '-_')` handled ':' and '/'
+	 * but not '\'. Cache keys routinely embed fully qualified class names
+	 * (EphenyxDigital\EphenyxCore\EmployeeConfiguration), and on Windows the
+	 * backslash is a directory separator: fopen() then targets a directory that
+	 * does not exist, the cache is never written, and php_error.log fills up with
+	 * hundreds of warnings per request. The remaining characters are the ones
+	 * Windows forbids in a file name.
+	 *
+	 * Both strtr() arguments must stay the same length (9 and 9).
+	 *
+	 * Side effect: sanitised keys map to different file names than before, so the
+	 * pre-existing cache files become orphans and are regenerated on first use.
+	 *
+	 * @param  string $key
+	 * @return string
+	 */
+	protected static function sanitizeKey($key) {
+
+		return strtr($key, ':/\\*?"<>|', '-________');
+	}
+
 	private function readFile($file) {
 
 		if (($fp = @fopen($file, 'rb')) !== false) {
@@ -122,7 +146,7 @@ class FileBased extends CacheApi implements CacheApiInterface {
 
 		$file = sprintf('%s/data_%s.cache',
 			$this->cachedir,
-			$this->prefix . strtr($key, ':/', '-_')
+			$this->prefix . self::sanitizeKey($key)
 		);
 
 		// EPH Data returns $value and $expired.  $expired has a unix timestamp of when this expires.
@@ -144,7 +168,7 @@ class FileBased extends CacheApi implements CacheApiInterface {
 
 		$file = sprintf('%s/data_%s.cache',
 			$this->cachedir,
-			$this->prefix . strtr($key, ':/', '-_')
+			$this->prefix . self::sanitizeKey($key)
 		);
 
 		return (bool) file_exists($file);
@@ -164,7 +188,7 @@ class FileBased extends CacheApi implements CacheApiInterface {
 
 		$file = sprintf('%s/data_%s.cache',
 			$this->cachedir,
-			$this->prefix . strtr($key, ':/', '-_')
+			$this->prefix . self::sanitizeKey($key)
 		);
 
 		// EPH Data returns $value and $expired.  $expired has a unix timestamp of when this expires.
@@ -215,7 +239,7 @@ class FileBased extends CacheApi implements CacheApiInterface {
 
 		$file = sprintf('%s/data_%s.cache',
 			$this->cachedir,
-			$this->prefix . strtr($key, ':/', '-_')
+			$this->prefix . self::sanitizeKey($key)
 		);
 		$ttl = $ttl !== null ? $ttl : $this->ttl;
 

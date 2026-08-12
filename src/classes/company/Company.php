@@ -334,6 +334,12 @@ class Company extends PhenyxObjectModel {
         $this->theme_directory = $row['directory'];
         $this->physical_uri = $row['physical_uri'];
         $this->virtual_uri = $row['virtual_uri'];
+        // Fix #15: `domain` was selected by the query above but never assigned,
+        // so Company::$domain stayed NULL for the whole request. Link::getBaseLink()
+        // then produced 'http://' . NULL . '/' = 'http:///' on every instance
+        // running in `conventionnel` mode (the `full_back` branch uses
+        // target_domain[0] instead, which masked the bug).
+        $this->domain = $row['domain'];
 		$this->domain_ssl = $row['domain_ssl'];
 		$this->target_domain = !empty($row['target_domain']) ? explode(",",$row['target_domain']) : [];
 

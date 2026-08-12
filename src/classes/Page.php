@@ -103,28 +103,58 @@ class Page extends PhenyxObjectModel {
 
     }
 
+    /**
+     * Incremente le compteur de vues d'une page pour la periode courante.
+     *
+     * ═══════════════════════════════════════════════════════════════════
+     *  UN SEUL ORDRE, PARCE QUE DEUX ORDRES SE COURENT APRES
+     * ═══════════════════════════════════════════════════════════════════
+     *
+     * Cette methode faisait : UPDATE, puis « si aucune ligne touchee, INSERT ».
+     * Deux visiteurs qui ouvrent la meme page au meme instant passent tous les
+     * deux par l'UPDATE — qui ne touche rien puisque la ligne n'existe pas
+     * encore — puis tous les deux par l'INSERT. Le second recoit
+     * « Duplicate entry '18-1776' for key 'PRIMARY' », et l'alerte part.
+     *
+     * ⚠️ CE N'EST PAS UN CAS RARE, C'EST LE CAS NORMAL AU CHANGEMENT DE
+     * PERIODE. `id_date_range` change a chaque nouvelle plage : la premiere
+     * ligne de chaque page doit alors etre creee, et c'est precisement le seul
+     * moment ou la fenetre de course est ouverte. Plus il y a de trafic, plus
+     * elle est probable.
+     *
+     * Un `INSERT ... ON DUPLICATE KEY UPDATE` fait le travail en UN ordre, que
+     * la base execute sous verrou. La cle primaire (id_page, id_date_range)
+     * garantit qu'il n'y a rien a arbitrer.
+     *
+     * ⚠️ Db::insert() avec ON_DUPLICATE_KEY ne convient PAS ici : il reecrit
+     * chaque colonne avec la valeur fournie, donc `counter` = 1. Il remettrait
+     * le compteur a un a chaque visite au lieu de l'incrementer. D'ou le SQL
+     * ecrit a la main.
+     *
+     * @param int $idPage
+     *
+     * @return void
+     */
     public static function setPageViewed($idPage) {
 
-        $idDateRange = DateRange::getCurrentRange();
-        $context = Context::getContext();
+        $idPage      = (int) $idPage;
+        $idDateRange = (int) DateRange::getCurrentRange();
 
-        $sql = 'UPDATE `' . _DB_PREFIX_ . 'page_viewed`
-                SET `counter` = `counter` + 1
-                WHERE `id_date_range` = ' . (int) $idDateRange . '
-                    AND `id_page` = ' . (int) $idPage;
-        Db::getInstance()->execute($sql);
+        /*
+         * Sans page ni periode, il n'y a rien a compter. La garde evite
+         * d'accumuler des lignes de clef 0 que personne ne lira jamais et qui
+         * fausseraient les totaux par periode.
+         */
 
-        if (Db::getInstance()->Affected_Rows() == 0) {
-            Db::getInstance()->insert(
-                'page_viewed',
-                [
-                    'id_date_range' => (int) $idDateRange,
-                    'id_page'       => (int) $idPage,
-                    'counter'       => 1,
-                ]
-            );
+        if ($idPage <= 0 || $idDateRange <= 0) {
+            return;
         }
 
+        Db::getInstance()->execute(
+            'INSERT INTO `' . _DB_PREFIX_ . 'page_viewed` (`id_page`, `id_date_range`, `counter`)
+             VALUES (' . $idPage . ', ' . $idDateRange . ', 1)
+             ON DUPLICATE KEY UPDATE `counter` = `counter` + 1'
+        );
     }
 
 }

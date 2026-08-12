@@ -124,6 +124,33 @@ abstract class CacheApi {
 	/**
 	 * Sets the cache prefix.
 	 *
+	 * The prefix has two jobs: keep instances that share a cache backend from
+	 * seeing each other's entries, and rotate wholesale whenever the instance
+	 * configuration changes so stale entries can never be served.
+	 *
+	 * It used to be md5($boardurl . filemtime('settings.inc.php')). That worked
+	 * back when settings.inc.php held the database credentials inline: touching
+	 * the credentials touched the file, and the mtime rotated the prefix. It no
+	 * longer holds anything variable — it just reads $_ENV — so:
+	 *
+	 *   - changing the database in .env left the prefix untouched and the old
+	 *     database's cache was served;
+	 *   - separation rested on $_SERVER['SERVER_NAME'] alone, which is EMPTY in
+	 *     CLI (cron). Every site's cron then fell back to md5('' . $mtime), and
+	 *     since the same settings.inc.php is deployed everywhere, two sites
+	 *     deployed in the same pass produced an IDENTICAL prefix. Harmless with
+	 *     FileBased (one cache dir per site) but not with CacheApcu, where APCu
+	 *     is a single shared memory segment per PHP-FPM pool and the prefix is
+	 *     the only thing keeping sites apart.
+	 *
+	 * The prefix is now derived from what actually identifies the instance
+	 * rather than from a file timestamp. _EPH_ROOT_DIR_ is what separates sites
+	 * when boardurl is empty; the database coordinates and the version are what
+	 * make the prefix rotate when it must.
+	 *
+	 * Credentials are deliberately excluded: the prefix ends up in cache file
+	 * names on disk.
+	 *
 	 * @access public
 	 * @param string $prefix The prefix to use.
 	 *     If empty, the prefix will be generated automatically.
@@ -143,8 +170,16 @@ abstract class CacheApi {
 			return true;
 		}
 
-		$mtime = filemtime(_EPH_CONFIG_DIR_ . 'settings.inc.php');
-		$this->prefix = md5($this->boardurl . $mtime) . '-';
+		$identity = [
+			$this->boardurl,
+			defined('_EPH_ROOT_DIR_') ? _EPH_ROOT_DIR_ : '',
+			defined('_DB_SERVER_') ? _DB_SERVER_ : '',
+			defined('_DB_NAME_') ? _DB_NAME_ : '',
+			defined('_DB_PREFIX_') ? _DB_PREFIX_ : '',
+			defined('_EPH_VERSION_') ? _EPH_VERSION_ : '',
+		];
+
+		$this->prefix = md5(implode('|', $identity)) . '-';
 
 		return true;
 	}
