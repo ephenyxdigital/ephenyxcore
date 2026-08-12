@@ -247,7 +247,45 @@ abstract class ExternalApi {
         }
 
         if ($this->lastHttpCode < 200 || $this->lastHttpCode >= 300) {
-            return $this->fail('Reponse HTTP ' . $this->lastHttpCode);
+
+            /*
+             * ⚠️ LE CORPS DE L'ERREUR ETAIT JETE (2026-08-11).
+             *
+             * « Reponse HTTP 403 » ne dit rien : une clef invalide, une API
+             * non activee, une restriction par referent, une facturation
+             * suspendue et un quota epuise rendent TOUS un 403. Or le
+             * fournisseur explique lui-meme lequel, dans le corps de sa
+             * reponse — que nous mettions a la poubelle.
+             *
+             * Constate en reel : trente-et-une expressions refusees par Google
+             * sans qu'on puisse savoir pourquoi, alors que la reponse portait
+             * le motif exact.
+             *
+             * On n'expose QUE le message : le corps complet peut contenir des
+             * echos de la requete, donc la clef.
+             */
+            $detail = '';
+            $erreur = json_decode((string) $body, true);
+
+            if (is_array($erreur)) {
+
+                if (isset($erreur['error']['message'])) {
+                    $detail = (string) $erreur['error']['message'];
+
+                    if (isset($erreur['error']['status'])) {
+                        $detail = (string) $erreur['error']['status'] . ' — ' . $detail;
+                    }
+
+                } else if (isset($erreur['message'])) {
+                    $detail = (string) $erreur['message'];
+                }
+
+            }
+
+            return $this->fail(
+                'Reponse HTTP ' . $this->lastHttpCode
+                . ($detail !== '' ? ' : ' . mb_substr($detail, 0, 300) : '')
+            );
         }
 
         // 204 : succes sans contenu. On rend un tableau vide, pas null, pour

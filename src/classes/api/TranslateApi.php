@@ -47,6 +47,25 @@ class TranslateApi extends ExternalApi {
     /** Au-dela, Google refuse la requete. On decoupe les lots. */
     const MAX_BATCH = 100;
 
+    /**
+     * Longueur maximale, en octets, de la partie « q=... » d'une requete.
+     *
+     * ⚠️ C'est la borne qui manquait. MAX_BATCH compte des CHAINES ; celle-ci
+     * compte des CARACTERES. Cent mots courts tiennent dans une adresse, dix
+     * phrases d'aide n'y tiennent pas — et le refus de Google est silencieux.
+     *
+     * LA VALEUR N'EST PAS DEVINEE. Le traducteur du wiki
+     * (AdminTranslationsController specifique, PHENYXWIKI_API_URL_BUDGET)
+     * decoupe deja a 1500 octets, et il fonctionne : quelqu'un avait rencontre
+     * la limite de ce cote, l'avait resolue la, et ne l'avait pas ramenee ici.
+     * On reprend sa valeur eprouvee plutot que d'en inventer une autre.
+     *
+     * En la posant a ce niveau, TOUS les appelants en beneficient — le budget
+     * du wiki devient une ceinture par-dessus les bretelles, ce qui ne coute
+     * rien.
+     */
+    const MAX_URL_LENGTH = 1500;
+
     /** @var Translation|null */
     protected $store;
 
@@ -237,11 +256,68 @@ class TranslateApi extends ExternalApi {
             return $out;
         }
 
-        foreach (array_chunk($todo, self::MAX_BATCH, true) as $chunk) {
+        foreach ($this->decouper($todo) as $chunk) {
             $this->askGoogle($chunk, $target, $source, $fileName, $out);
         }
 
         return $out;
+    }
+
+    /**
+     * Decoupe le lot en requetes que Google acceptera.
+     *
+     * ═══ POURQUOI PAS array_chunk() TOUT SEUL (2026-08-11) ═══
+     *
+     * askGoogle() envoie les libelles en GET, un parametre « q » par chaine.
+     * MAX_BATCH bornait le NOMBRE de chaines, jamais la LONGUEUR de l'adresse.
+     * Or trente phrases completes — pas des mots isoles, des phrases d'aide de
+     * plusieurs lignes — depassent largement la limite de taille d'URL.
+     *
+     * L'echec est total et muet : Google refuse la requete entiere, askGoogle
+     * sort par son fail-open, et les trente-deux chaines reviennent identiques
+     * a elles-memes. A l'ecran, l'employe voit « traduction terminee » et pas
+     * une seule ligne remplie.
+     *
+     * Constate en reel : sur un lot de trente-deux libelles d'aide, seule
+     * « APE code » est revenue traduite — et encore, parce qu'elle etait deja
+     * dans le magasin, donc jamais partie chez Google.
+     *
+     * On borne donc AUSSI la longueur encodee. La limite retenue est basse a
+     * dessein : une adresse de requete traverse des serveurs mandataires dont
+     * on ne choisit pas les reglages, et un lot de dix phrases reste
+     * infiniment moins couteux que dix appels separes.
+     *
+     * @param array $todo
+     *
+     * @return array[] Liste de lots, clefs d'origine preservees
+     */
+    protected function decouper(array $todo) {
+
+        $lots    = [];
+        $courant = [];
+        $taille  = 0;
+
+        foreach ($todo as $clef => $texte) {
+
+            // « q= » plus la valeur encodee, plus le « & » qui la relie.
+            $poids = strlen(rawurlencode($texte)) + 4;
+
+            if (count($courant) > 0
+                && ($taille + $poids > self::MAX_URL_LENGTH || count($courant) >= self::MAX_BATCH)) {
+                $lots[]  = $courant;
+                $courant = [];
+                $taille  = 0;
+            }
+
+            $courant[$clef] = $texte;
+            $taille += $poids;
+        }
+
+        if (count($courant) > 0) {
+            $lots[] = $courant;
+        }
+
+        return $lots;
     }
 
     /**
@@ -273,9 +349,31 @@ class TranslateApi extends ExternalApi {
             $parts[] = 'source=' . rawurlencode($source);
         }
 
-        $payload = $this->get(self::ENDPOINT . '?' . implode('&', $parts));
+        $requete = self::ENDPOINT . '?' . implode('&', $parts);
+        $payload = $this->get($requete);
 
         if ($payload === null) {
+
+            /*
+             * ⚠️ LE FAIL-OPEN NE DOIT PAS ETRE MUET (2026-08-11).
+             *
+             * Il ne l'etait pas par negligence mais par principe : une API
+             * injoignable ne doit pas faire tomber un ecran. Sauf qu'ici,
+             * rendre les chaines sources SANS RIEN DIRE produit un resultat
+             * indiscernable d'un succes — l'appelant filtre ce qui n'a pas
+             * change, ne trouve rien, et annonce « traduction terminee ».
+             *
+             * On garde le fail-open, on retire le silence. La longueur de la
+             * requete est journalisee : c'est elle qui a fait echouer les lots
+             * de phrases completes, et sans elle on cherche du cote du quota.
+             */
+            PhenyxLogger::addLog(
+                '[API ' . static::CODE . '] lot de ' . count($chunk) . ' chaine(s) non traduit : '
+                . ((string) $this->lastError() !== '' ? $this->lastError() : 'aucune reponse')
+                . ' (code ' . (int) $this->lastHttpCode() . ', requete de ' . strlen($requete) . ' octets)',
+                2
+            );
+
             // Fail-open : $out garde deja les chaines sources.
             return;
         }

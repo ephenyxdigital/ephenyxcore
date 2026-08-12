@@ -2049,18 +2049,21 @@ abstract class PhenyxController {
      * @return array Tableau associatif [titre => config_champ] avec hidden et hiddenable
      */
 
-    public function manageFieldsVisibility($fields) {
+    public function manageFieldsVisibility($fields, $origins = []) {
 
         $return = [];
 
         if (is_array($fields)) {
 
             foreach ($fields as $field) {
+				
+				
                 $name = '';
                 $hidden = false;
                 $hiddenable = 'yes';
 
                 foreach ($field as $key => $value) {
+					
 
                     if ($key == 'title') {
                         $name = $value;
@@ -2078,6 +2081,16 @@ abstract class PhenyxController {
                         }
 
                     }
+										
+					if(count($origins)) {						
+						foreach($origins as $origin) {
+							foreach ($origin as $value) {
+								if($origin['dataIndx'] == $field['dataIndx']) {
+									$field = $origin;
+								}
+							}
+						}
+					}
 
                 }
 
@@ -2136,7 +2149,7 @@ abstract class PhenyxController {
             ();
             $data->assign([
                 'manageHeaderFields' => $this->manageHeaderFields,
-                'customHeaderFields' => $this->manageFieldsVisibility($configurationField),
+                'customHeaderFields' => $this->manageFieldsVisibility($this->configurationField, $configurationField),
             ]);
         }
 
@@ -2197,7 +2210,7 @@ abstract class PhenyxController {
         }
 
         if (method_exists($this, 'get' . $this->className . 'Fields')) {
-            $this->configurationField = $this->{'get' . $this->className . 'Fields'}
+            $configurationField = $this->{'get' . $this->className . 'Fields'}
 
             ();
             $data->assign([
@@ -2210,7 +2223,7 @@ abstract class PhenyxController {
                 // même convention — openTargetController(),
                 // ajaxProcessOpenTargetController(), ajaxProcessRefreshContent() —
                 // utilisent une variable locale et n'étaient pas touchés.
-                'customHeaderFields' => $this->manageFieldsVisibility($this->configurationField),
+                'customHeaderFields' => $this->manageFieldsVisibility($this->configurationField, $configurationField),
             ]);
 
         }
@@ -2325,7 +2338,7 @@ abstract class PhenyxController {
             ();
             $data->assign([
                 'manageHeaderFields' => $this->manageHeaderFields,
-                'customHeaderFields' => $this->manageFieldsVisibility($configurationField),
+                'customHeaderFields' => $this->manageFieldsVisibility($this->configurationField,$configurationField),
             ]);
         }
 
@@ -2397,7 +2410,7 @@ abstract class PhenyxController {
             ();
             $data->assign([
                 'manageHeaderFields' => $this->manageHeaderFields,
-                'customHeaderFields' => $this->manageFieldsVisibility($configurationField),
+                'customHeaderFields' => $this->manageFieldsVisibility($this->configurationField, $configurationField),
             ]);
         }
 

@@ -437,15 +437,26 @@ class Media {
         //set default folder
 
         $file = 'jquery.' . $name . '.js';
+		$filemin = 'jquery.' . $name . '.min.js';
         $urlData = parse_url($folder);
         $fileUri = _EPH_ROOT_DIR_ . Tools::str_replace_once(__EPH_BASE_URI__, DIRECTORY_SEPARATOR, $urlData['path']);
 
-        if (@file_exists($fileUri . $file)) {
+        if (@file_exists($fileUri . $filemin)) {
+			
+            $pluginPath['js'] = $this->getJSPath($folder . $filemin);
+			
+        } elseif (@file_exists($fileUri . $file)) {
+			
             $pluginPath['js'] = $this->getJSPath($folder . $file);
-        } else
-
-        if (@file_exists($fileUri . $name . '/' . $file)) {
+			
+        } elseif (@file_exists($fileUri . $name . '/' . $filemin)) {
+			
+            $pluginPath['js'] = $this->getJSPath($folder . $name . '/' . $filemin);
+			
+        }  elseif (@file_exists($fileUri . $name . '/' . $file)) {
+			
             $pluginPath['js'] = $this->getJSPath($folder . $name . '/' . $file);
+			
         } else {
             return false;
         }
