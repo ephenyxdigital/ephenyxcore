@@ -1,6 +1,6 @@
 <?php
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 
 use Address;
 use AdminController;
@@ -17,7 +17,7 @@ use User;
 
 
 // Aliasé en PhpCurl : le nom court "Curl" entre en collision avec l'alias
-// EphenyxDigital\QuantumCore\Curl généré par aliases.php.
+// EphenyxDigital\EphenyxCore\Curl généré par aliases.php.
 use Curl\Curl as PhpCurl;
 
 /**

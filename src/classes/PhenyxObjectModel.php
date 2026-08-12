@@ -1,6 +1,6 @@
 <?php
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 
 use ImageType;
 use Language;

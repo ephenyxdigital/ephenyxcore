@@ -1,6 +1,6 @@
 <?php
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 
 /**
  * Configuration d'un fournisseur d'API externe.

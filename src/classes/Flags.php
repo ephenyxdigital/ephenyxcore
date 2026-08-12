@@ -1,6 +1,6 @@
 <?php
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 /**
  * @since 1.9.1.0
  */

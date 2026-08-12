@@ -1,7 +1,7 @@
 <?php
 
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 interface ITreeToolbarButton {
     public function __toString();
     public function setAttribute($name, $value);

@@ -1,7 +1,7 @@
 <?php
 
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 /**
  * Interface Core_Business_ConfigurationInterface
  *

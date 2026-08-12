@@ -1,7 +1,7 @@
 <?php
 
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 class ComposerSeetings {
 
 	protected $option_group = 'wpb_js_composer_settings';

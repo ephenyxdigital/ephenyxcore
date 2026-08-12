@@ -2,7 +2,7 @@
 
 
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 class ComposerShortCode_vc_blockcontact extends ComposerShortCode {
 
 	protected function outputTitle($title) {

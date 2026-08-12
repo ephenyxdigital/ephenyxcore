@@ -1,7 +1,7 @@
 <?php
 
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 class ComposerEditLayout extends Composer {
 
 	public function render($editor) {

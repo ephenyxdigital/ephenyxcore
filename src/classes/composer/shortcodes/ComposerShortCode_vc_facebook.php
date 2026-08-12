@@ -1,6 +1,6 @@
 <?php
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 class ComposerShortCode_vc_facebook extends ComposerShortCode {
 
     protected function contentInline($atts, $content = null) {

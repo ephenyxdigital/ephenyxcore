@@ -1,6 +1,6 @@
 <?php
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 
 $output = $width = $el_class = $title = $twitter_name = $tweet_count = $el_position = $tweets_count = '';
 

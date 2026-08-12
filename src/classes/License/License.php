@@ -1,6 +1,6 @@
 <?php
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 
 use Address;
 use AppendIterator;
@@ -47,7 +47,7 @@ use VersionController;
 
 use Defuse\Crypto\Crypto;
 // Aliasé en PhpCurl : le nom court "Curl" entre en collision avec l'alias
-// EphenyxDigital\QuantumCore\Curl généré par aliases.php (fatal au chargement).
+// EphenyxDigital\EphenyxCore\Curl généré par aliases.php (fatal au chargement).
 use Curl\Curl as PhpCurl;
 
 class License extends PhenyxObjectModel {

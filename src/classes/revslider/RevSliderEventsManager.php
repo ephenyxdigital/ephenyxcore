@@ -1,6 +1,6 @@
 <?php
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 
 /**
  * Stub class - WordPress "Events Manager" plugin integration is irrelevant in Phenyx.

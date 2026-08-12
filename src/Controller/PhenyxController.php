@@ -1,6 +1,6 @@
 <?php
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 
 use Alignment;
 use Employee;
@@ -3789,7 +3789,7 @@ abstract class PhenyxController {
             ]));
         }
 
-        if (!class_exists($targetClass) || !is_subclass_of($targetClass, 'EphenyxDigital\QuantumCore\PhenyxObjectModel')) {
+        if (!class_exists($targetClass) || !is_subclass_of($targetClass, 'EphenyxDigital\EphenyxCore\PhenyxObjectModel')) {
             die($this->context->_tools->jsonEncode([
                 'success' => false,
                 'message' => $this->la('This object cannot be deleted from this screen.'),

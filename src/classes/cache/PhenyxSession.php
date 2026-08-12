@@ -1,7 +1,7 @@
 <?php
 
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 class PhenyxSession extends PhenyxServices {
 
     const SESSION_NAMESPACE = 'phenyx_digital';

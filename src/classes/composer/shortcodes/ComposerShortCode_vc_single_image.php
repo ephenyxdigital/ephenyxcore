@@ -1,6 +1,6 @@
 <?php
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 
 class ComposerShortCode_vc_single_image extends ComposerShortCode {
 

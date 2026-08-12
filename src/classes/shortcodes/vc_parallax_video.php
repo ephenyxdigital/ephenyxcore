@@ -1,6 +1,6 @@
 <?php
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 
 $output = $el_class = $video = $css_animation = '' ;
 extract(Composer::shortcode_atts([

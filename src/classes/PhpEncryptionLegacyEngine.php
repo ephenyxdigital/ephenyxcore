@@ -1,7 +1,7 @@
 <?php
 
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 /**
  * Class PhpEncryption engine for openSSL < 0.9.8.
  *

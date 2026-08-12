@@ -1,6 +1,6 @@
 <?php
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 
 
 abstract class ComposerShortCodeUniversalAdmin extends ComposerShortCode {

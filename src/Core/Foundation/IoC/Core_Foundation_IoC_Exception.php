@@ -2,7 +2,7 @@
 
 
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 /**
  * Class Core_Foundation_IoC_Exception
  *

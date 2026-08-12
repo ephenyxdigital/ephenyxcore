@@ -2,7 +2,7 @@
 
 
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 /**
  * Class Core_Business_ContainerBuilder
  *

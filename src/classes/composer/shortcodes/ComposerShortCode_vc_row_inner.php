@@ -2,7 +2,7 @@
 
 
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 class ComposerShortCode_vc_row_inner extends ComposerShortCode_vc_row {
 
 	protected function getFileName() {

@@ -1,6 +1,6 @@
 <?php
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 
 /**
  * Repertoire des entreprises francaises (Etalab / data.gouv.fr).

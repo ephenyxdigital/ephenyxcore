@@ -1,6 +1,6 @@
 <?php
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 
 if (!defined('TAB_TITLE')) {
     define('TAB_TITLE', "Tab");

@@ -1,6 +1,6 @@
 <?php
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 
 /**
  * Stub class - WordPress/ThemePunch CDN load balancer is irrelevant in Phenyx.

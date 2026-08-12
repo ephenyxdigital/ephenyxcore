@@ -1,6 +1,6 @@
 <?php
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 
 
 define('SHORTCODE_CUSTOMIZE_PREFIX', 'vc_theme_');

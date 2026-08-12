@@ -1,7 +1,7 @@
 <?php
 
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 class ComposerShortCode_vc_raw_html extends ComposerShortCode {
 
 	public function singleParamHtmlHolder($param, $value) {

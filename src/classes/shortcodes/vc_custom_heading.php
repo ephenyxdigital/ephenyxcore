@@ -1,6 +1,6 @@
 <?php
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 
 
 $output = $text = $google_fonts = $font_container = $el_class = $css = $google_fonts_data = $font_container_data = '';

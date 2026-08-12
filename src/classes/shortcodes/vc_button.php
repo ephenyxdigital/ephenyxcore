@@ -1,6 +1,6 @@
 <?php
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 
 $vc_manager = ephenyx_manager();
 $output = $color = $size = $icon = $target = $href = $el_class = $title = $position = '';

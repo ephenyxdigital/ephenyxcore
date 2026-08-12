@@ -1,6 +1,6 @@
 <?php
 
-namespace EphenyxDigital\QuantumCore;
+namespace EphenyxDigital\EphenyxCore;
 
 $output = $category = $orderby = $options = $el_class = '';
 extract(Composer::shortcode_atts([
