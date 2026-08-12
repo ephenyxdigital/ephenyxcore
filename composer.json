@@ -1,7 +1,7 @@
 {
-    "name": "ephenyxdigital/quantumcore",
+    "name": "ephenyxdigital/ephenyxcore",
     "description": "Deploy Ephenyx Digital Core",
-    "homepage": "https://github.com/ephenyxdigital/quantumcore",
+    "homepage": "https://github.com/ephenyxdigital/ephenyxcore",
     "type": "library",
     "license": "MIT",
     "authors": [
