@@ -179,10 +179,29 @@ abstract class ExternalApi {
         }
 
         if ($ttl > 0) {
-            ApiCache::set(static::CODE, $hash, $payload, $ttl, $this->lastHttpCode, $path . '?' . http_build_query($query));
+            ApiCache::set(static::CODE, $hash, $payload, $ttl, $this->lastHttpCode, $this->cacheSummary($path, $query));
         }
 
         return $payload;
+    }
+
+    /**
+     * Resume lisible de la requete, ecrit dans api_cache.request_summary.
+     *
+     * Redefinissable parce que TOUTES les requetes ne sont pas anodines a
+     * conserver en clair. Le resume par defaut recopie le chemin et les
+     * parametres ; pour un fournisseur dont le chemin porte une donnee
+     * sensible — un IBAN, par exemple — la fille rend une forme redigee.
+     * L'empreinte de cache, elle, reste calculee sur la requete reelle.
+     *
+     * @param string     $path
+     * @param array|null $query
+     *
+     * @return string
+     */
+    protected function cacheSummary($path, ?array $query = null) {
+
+        return $path . '?' . http_build_query($query ?: []);
     }
 
     /**

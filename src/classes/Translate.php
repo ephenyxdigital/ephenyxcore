@@ -408,6 +408,17 @@ class Translate {
             if (isset($plugMap[$defaultKey])) {
                 return $this->postProcessHtml($plugMap[$defaultKey], $addslashes, $htmlentities, $sprintf);
             }
+
+            // Repli sur le prefixe generique `FrontController` -- MEME convention que
+            // getGenericFrontTranslation() plus bas, qui l'applique au dictionnaire du
+            // NOYAU. Elle manquait au dictionnaire des PLUGINS : les chaines du controleur
+            // socle d'un plugin (classes/controller/XxxFrontController.php) sont partagees
+            // par tous ses controleurs concrets, donc indexees sous `FrontController`, alors
+            // que $defaultKey porte le prefixe de la classe concrete (AgentDashboard, ...).
+            // Sans ce repli, elles etaient extraites, ecrites dans front.php, et jamais lues.
+            if (isset($plugMap['FrontController' . $key])) {
+                return $this->postProcessHtml($plugMap['FrontController' . $key], $addslashes, $htmlentities, $sprintf);
+            }
         }
 
         if (isset($this->context->translations->langfront)) {

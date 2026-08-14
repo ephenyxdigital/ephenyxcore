@@ -23,6 +23,7 @@ return [
     'AddressFormat' => 'EphenyxDigital\\EphenyxCore\\AddressFormat',
     'ApiCache' => 'EphenyxDigital\\EphenyxCore\\ApiCache',
     'ApiProvider' => 'EphenyxDigital\\EphenyxCore\\ApiProvider',
+    'BicApi' => 'EphenyxDigital\\EphenyxCore\\BicApi',
     'AwsRedis' => 'EphenyxDigital\\EphenyxCore\\AwsRedis',
     'BackTab' => 'EphenyxDigital\\EphenyxCore\\BackTab',
     'Blowfish' => 'EphenyxDigital\\EphenyxCore\\Blowfish',

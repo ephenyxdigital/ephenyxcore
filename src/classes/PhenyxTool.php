@@ -3933,7 +3933,7 @@ class PhenyxTool {
                 return false;
             }
 
-            $part = static::encodePart($part);
+            $part = $this->encodePart($part);
         }
 
         $output = implode('.', $parts);
@@ -3974,7 +3974,7 @@ class PhenyxTool {
             }
 
             $part = substr($part, strlen(static::PUNYCODE_PREFIX));
-            $part = static::decodePart($part);
+            $part = $this->decodePart($part);
         }
 
         $output = implode('.', $parts);
@@ -3998,17 +3998,17 @@ class PhenyxTool {
      *
      * @copyright 2014 TrueServer B.V. (https://github.com/true/php-punycode)
      */
-    protected static function encodePart($input) {
+    public function encodePart($input) {
 
-        $codePoints = static::listCodePoints($input);
+        $codePoints = $this->listCodePoints($input);
         $n = static::PUNYCODE_INITIAL_N;
         $bias = static::PUNYCODE_INITIAL_BIAS;
         $delta = 0;
         $h = $b = count($codePoints['basic']);
         $output = '';
 
-        foreach ($codePoints['basic'] as $code) {
-            $output .= static::codePointToChar($code);
+       foreach ($codePoints['basic'] as $code) {
+            $output .= $this->codePointToChar($code);
         }
 
         if ($input === $output) {
@@ -4022,7 +4022,7 @@ class PhenyxTool {
         $codePoints['nonBasic'] = array_unique($codePoints['nonBasic']);
         sort($codePoints['nonBasic']);
         $i = 0;
-        $length = static::strlen($input);
+        $length = $this->strlen($input);
 
         while ($h < $length) {
             $m = $codePoints['nonBasic'][$i++];
@@ -4039,19 +4039,19 @@ class PhenyxTool {
                     $q = $delta;
 
                     for ($k = static::PUNYCODE_BASE;; $k += static::PUNYCODE_BASE) {
-                        $t = static::calculateThreshold($k, $bias);
+                        $t = $this->calculateThreshold($k, $bias);
 
                         if ($q < $t) {
                             break;
                         }
 
                         $code = $t + (($q - $t) % (static::PUNYCODE_BASE - $t));
-                        $output .= static::$encodeTable[$code];
+                        $output .= $this->$encodeTable[$code];
                         $q = ($q - $t) / (static::PUNYCODE_BASE - $t);
                     }
 
-                    $output .= static::$encodeTable[$q];
-                    $bias = static::adapt($delta, $h + 1, ($h === $b));
+                    $output .= $this->$encodeTable[$q];
+                    $bias = $this->adapt($delta, $h + 1, ($h === $b));
                     $delta = 0;
                     $h++;
                 }
@@ -4083,7 +4083,7 @@ class PhenyxTool {
      *
      * @copyright 2014 TrueServer B.V. (https://github.com/true/php-punycode)
      */
-    protected static function decodePart($input) {
+    public function decodePart($input) {
 
         $n = static::PUNYCODE_INITIAL_N;
         $i = 0;
@@ -4105,9 +4105,9 @@ class PhenyxTool {
             $w = 1;
 
             for ($k = static::PUNYCODE_BASE;; $k += static::PUNYCODE_BASE) {
-                $digit = static::$decodeTable[$input[$pos++]];
+                $digit = $this->$decodeTable[$input[$pos++]];
                 $i = $i + ($digit * $w);
-                $t = static::calculateThreshold($k, $bias);
+                $t = $this->calculateThreshold($k, $bias);
 
                 if ($digit < $t) {
                     break;
@@ -4116,10 +4116,10 @@ class PhenyxTool {
                 $w = $w * (static::PUNYCODE_BASE - $t);
             }
 
-            $bias = static::adapt($i - $oldi, ++$outputLength, ($oldi === 0));
+            $bias = $this->adapt($i - $oldi, ++$outputLength, ($oldi === 0));
             $n = $n + (int) ($i / $outputLength);
             $i = $i % ($outputLength);
-            $output = static::substr($output, 0, $i) . static::codePointToChar($n) . static::substr($output, $i, $outputLength - 1);
+            $output = $this->substr($output, 0, $i) . $this->codePointToChar($n) . $this->substr($output, $i, $outputLength - 1);
             $i++;
         }
 
@@ -4138,7 +4138,7 @@ class PhenyxTool {
      *
      * @copyright 2014 TrueServer B.V. (https://github.com/true/php-punycode)
      */
-    protected static function calculateThreshold($k, $bias) {
+    public function calculateThreshold($k, $bias) {
 
         if ($k <= $bias+static::PUNYCODE_TMIN) {
             return static::PUNYCODE_TMIN;
@@ -4164,7 +4164,7 @@ class PhenyxTool {
      *
      * @copyright 2014 TrueServer B.V. (https://github.com/true/php-punycode)
      */
-    protected static function adapt($delta, $numPoints, $firstTime) {
+    public function adapt($delta, $numPoints, $firstTime) {
 
         $delta = (int) (
             ($firstTime)
@@ -4195,18 +4195,18 @@ class PhenyxTool {
      *
      * @copyright 2014 TrueServer B.V. (https://github.com/true/php-punycode)
      */
-    protected static function listCodePoints($input) {
+    public function listCodePoints($input) {
 
         $codePoints = [
             'all'      => [],
             'basic'    => [],
             'nonBasic' => [],
         ];
-        $length = static::strlen($input);
+        $length = $this->strlen($input);
 
         for ($i = 0; $i < $length; $i++) {
-            $char = static::substr($input, $i, 1);
-            $code = static::charToCodePoint($char);
+            $char = $this->substr($input, $i, 1);
+            $code = $this->charToCodePoint($char);
 
             if ($code < 128) {
                 $codePoints['all'][] = $codePoints['basic'][] = $code;
@@ -4229,7 +4229,7 @@ class PhenyxTool {
      *
      * @copyright 2014 TrueServer B.V. (https://github.com/true/php-punycode)
      */
-    protected static function charToCodePoint($char) {
+    public function charToCodePoint($char) {
 
         $code = ord($char[0]);
 
@@ -4260,7 +4260,7 @@ class PhenyxTool {
      * @copyright 2014 TrueServer B.V. (https://github.com/true/php-punycode)
      *
      */
-    protected static function codePointToChar($code) {
+    public function codePointToChar($code) {
 
         if ($code <= 0x7F) {
             return chr($code);
@@ -5928,6 +5928,46 @@ class PhenyxTool {
 
                         $terTabs[$index3]['name'] = $terTab['name'];
                     }
+					
+					$quatTabs = BackTab::getBackTabs($this->context->language->id, $terTab['id_back_tab'], $use_cache);
+
+                	foreach ($quatTabs as $index4 => $quatTab) {
+
+                    	if (!BackTab::checkTabRights($quatTab['id_back_tab'])) {
+                        	unset($quatTabs[$index4]);
+                        	continue;
+                    	}
+
+                    	if ($quatTab['master'] && $this->context->employee->phenyx_admin == 0) {
+							unset($quatTabs[$index4]);
+                        	continue;
+                   	 	}
+
+                    	if (!empty($quatTab['plugin'])) {
+
+                        	if (!Plugin::isActive($quatTab['plugin'])) {
+                            	unset($quatTabs[$index4]);
+                            	continue;
+                        	}
+
+                    	}
+
+                    	if ((bool) $quatTab['active']) {
+
+                        	if (!is_null($quatTab['function'])) {
+                            	$quatTabs[$index4]['function'] = str_replace("‘", "'", $quatTab['function']);
+                        	}
+
+                        	$quatTabs[$index4]['name'] = $quatTab['name'];
+                    	}
+
+					}
+
+					/* Sans cette ligne, la boucle ci-dessus filtrait les onglets
+					   de niveau 4 pour rien : $quatTabs mourait a la fin de
+					   l'iteration et `$t3.sub_tabs` n'existait jamais dans
+					   nav.tpl. Ajoute avec le 4e niveau du menu. */
+					$terTabs[$index3]['sub_tabs'] = array_values($quatTabs);
 
                 }
 

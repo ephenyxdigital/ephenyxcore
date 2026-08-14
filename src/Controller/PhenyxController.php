@@ -4607,7 +4607,7 @@ abstract class PhenyxController {
                     if (mb_detect_encoding($value, 'UTF-8', true) && mb_strpos($value, '@') > -1) {
                         // Convert to IDN
                         list($local, $domain) = explode('@', $value, 2);
-                        $domain = $this->context->_tools->utf8ToIdn($domain);
+                        $domain = Tools::utf8ToIdn($domain);
                         $value = "$local@$domain";
                     }
 
