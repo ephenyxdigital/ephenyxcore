@@ -96,6 +96,43 @@ class BicApi extends ExternalApi {
     ];
 
     /**
+     * Pose la ligne api_provider du service, si elle manque.
+     *
+     * A appeler depuis le `install()` de chaque plugin qui a besoin du BIC —
+     * aujourd'hui ph_salesforce et ph_sepa. La description du fournisseur vit
+     * ICI, dans la classe qui l'utilise, et pas recopiee dans chaque plugin :
+     * deux copies divergent, et c'est l'adresse de l'API qui en fait les frais.
+     *
+     * `ApiProvider::ensure()` garantit qu'une ligne existante n'est ni
+     * dupliquee ni ecrasee : le second plugin installe ne touche pas a la cle
+     * saisie apres le premier.
+     *
+     * @return ApiProvider|null
+     */
+    public static function ensureProvider() {
+
+        return ApiProvider::ensure(self::CODE, [
+            'name'            => 'IBAN API — resolution BIC',
+            'base_url'        => 'https://api.ibanapi.com/v1',
+            'auth_type'       => ApiProvider::AUTH_QUERY,
+            'auth_name'       => 'api_key',
+            'auth_key'        => '',
+            'connect_timeout' => 3,
+            'timeout'         => 5,
+
+            /* Volontairement sans cache. ApiCache indexe par md5 de la requete
+               et recopie celle-ci en clair dans request_summary — or la requete
+               CONTIENT l'IBAN. BicApi memorise a sa place, a la maille banque
+               plus guichet, dans app/cache/bic_branch_map.json : c'est de cela
+               que depend le BIC, jamais du numero de compte. */
+            'cache_ttl'       => 0,
+
+            'rate_limit'      => 0,
+            'fail_open'       => 1,
+        ]);
+    }
+
+    /**
      * Majuscules, sans espaces ni ponctuation.
      *
      * Les IBAN se transmettent par groupes de quatre — c'est meme la forme

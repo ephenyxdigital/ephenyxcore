@@ -122,6 +122,110 @@ class ApiProvider extends PhenyxObjectModel {
     }
 
     /**
+     * Cree la ligne d'un fournisseur si elle n'existe pas — et JAMAIS deux fois.
+     *
+     * ─── POURQUOI EN PHP, ET PAS DANS UN install.sql ───
+     *
+     * Un plugin qui a besoin d'une API veut poser sa ligne dans api_provider a
+     * l'installation. Trois raisons interdisent de le faire en SQL :
+     *
+     *  1. `Plugin::installsql()` decoupe le fichier avec
+     *     `preg_split("/;\s*[\r\n]+/", $sql)`. N'IMPORTE QUEL point-virgule
+     *     suivi d'un saut de ligne coupe la requete — y compris dans un
+     *     commentaire `--` ou dans une chaine. Un INSERT commente se retrouve
+     *     scinde en fragments invalides, et l'installation echoue sans dire ou.
+     *
+     *  2. `installsql()` n'examine jamais le retour de `Db::execute()` : une
+     *     requete refusee passe inapercue et `install()` rend quand meme true.
+     *
+     *  3. Deux plugins peuvent avoir besoin du MEME fournisseur — `bic` sert
+     *     a ph_salesforce comme a ph_sepa. Le second installe ne doit ni creer
+     *     un doublon, ni ecraser la cle saisie par l'exploitant apres le
+     *     premier.
+     *
+     * ─── CE QUE LA METHODE FAIT, ET SURTOUT CE QU'ELLE NE FAIT PAS ───
+     *
+     * Si la ligne existe, elle n'est PAS remplacee : `auth_key` et `active`
+     * sont des reglages d'exploitation, pas des donnees de plugin. Un
+     * reinstall ne doit jamais eteindre une API allumee ni effacer une cle.
+     * Seule `base_url` est rafraichie — c'est la convention deja retenue par
+     * `sql/api_layer.sql` (`ON DUPLICATE KEY UPDATE base_url = VALUES(...)`),
+     * pour qu'un changement d'adresse arrive par mise a jour du code.
+     *
+     * A la creation, la ligne est posee ETEINTE (`active = 0`), meme si les
+     * defauts disent le contraire. Une API allumee sans cle valide est pire
+     * qu'une API absente : `create()` rend un objet utilisable qui echoue a
+     * chaque appel, la ou `null` fait proprement basculer l'appelant vers son
+     * repli. C'est a l'exploitant d'allumer, une fois la cle saisie.
+     *
+     * Rend null sans bruit si la table n'existe pas — le SQL de la couche API
+     * n'a pas ete joue sur tous les sites, et cela ne doit pas empecher un
+     * plugin de s'installer.
+     *
+     * @param string $code     Code technique du fournisseur
+     * @param array  $defaults Colonnes a poser a la creation
+     *
+     * @return ApiProvider|null
+     */
+    public static function ensure($code, ?array $defaults = null) {
+
+        $code = (string) $code;
+
+        if ($code === '') {
+            return null;
+        }
+
+        $defaults = $defaults ?: [];
+        $existing = static::getByCode($code);
+
+        if ($existing !== null) {
+
+            if (!empty($defaults['base_url']) && $defaults['base_url'] !== $existing->base_url) {
+
+                try {
+                    $existing->base_url = (string) $defaults['base_url'];
+                    $existing->update();
+                } catch (\Throwable $e) {
+                    // Sans consequence : l'ancienne adresse reste en place.
+                }
+
+            }
+
+            return $existing;
+        }
+
+        try {
+            $provider = new static();
+
+            foreach (['code', 'name', 'base_url', 'auth_type', 'auth_name', 'auth_key',
+                'connect_timeout', 'timeout', 'cache_ttl', 'rate_limit', 'fail_open'] as $field) {
+
+                if (array_key_exists($field, $defaults)) {
+                    $provider->{$field} = $defaults[$field];
+                }
+
+            }
+
+            $provider->code = $code;
+            $provider->active = 0;
+
+            if (!$provider->add()) {
+                return null;
+            }
+
+        } catch (\Throwable $e) {
+            // Table absente, ou colonne inconnue : le plugin s'installe quand
+            // meme, l'API sera simplement consideree eteinte.
+            return null;
+        }
+
+        // getByCode() a memorise « absent » juste avant la creation.
+        static::resetCache();
+
+        return $provider;
+    }
+
+    /**
      * Le fournisseur est-il utilisable ?
      *
      * @return bool
