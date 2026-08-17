@@ -309,6 +309,38 @@ class HelperUploader extends PhenyxUploader {
     }
 
     /**
+     * Resout le chemin du gabarit d'upload, du plus specifique au plus general.
+     *
+     * ⚠️ CORRIGE LE 2026-08-16 — cette methode retournait `null`.
+     *
+     * L'ancienne redaction enchainait les candidats en `if / else if`, avec le
+     * cas « controleur de plugin » en TETE de chaine :
+     *
+     *     if ($controleur instanceof PluginAdminController) {
+     *         if (file_exists(<gabarit du plugin>)) { return <gabarit du plugin>; }
+     *     } else if (…) { … } else { return <recours>; }
+     *
+     * Des lors que le controleur appelant appartenait a un plugin ET que le
+     * plugin ne fournissait pas son propre `views/templates/admin/helpers/
+     * uploader/simple.tpl` — c'est-a-dire toujours, aucun plugin n'en fournit —
+     * la premiere branche etait prise, son `file_exists` echouait, et la
+     * fonction sortait par le bas SANS `return`. Les trois candidats suivants,
+     * dont celui du socle (`content/backoffice/backend/helpers/uploader/`) qui
+     * existe bel et bien, etaient inatteignables : ils pendaient au `else` du
+     * premier `if`.
+     *
+     * `render()` passait donc `null` a `Smarty::createTemplate()`, d'ou le
+     * « Deprecated: strpos(): Passing null » (Smarty.php:986) puis l'exception
+     * « Source: Missing name » (Template/Source.php:146). Concretement, tout
+     * champ `'type' => 'file'` d'un formulaire servi par un
+     * PluginAdminController etait mort — constate sur
+     * AdminPieceStatusesController (champ « Icone »), mais le defaut etait
+     * general : il touchait les 60+ controleurs admin de plugins.
+     *
+     * La reecriture empile les candidats dans une liste ordonnee et ne teste
+     * `file_exists` qu'a la fin : ajouter un candidat ne peut plus couper les
+     * suivants, et il y a toujours un `return`.
+     *
      * @param string $template
      *
      * @return string
@@ -318,33 +350,70 @@ class HelperUploader extends PhenyxUploader {
      */
     public function getTemplateFile($template) {
 
-        if (preg_match_all('/((?:^|[A-Z])[a-z]+)/', get_class($this->getContext()->controller), $matches) !== false) {
-            $controllerName = strtolower($matches[0][1]);
-        }
+        $context = $this->getContext();
+        $controller = $context->controller;
+        $directory = $this->getTemplateDirectory();
+        $candidates = [];
 
-        if ($this->getContext()->controller instanceof PluginAdminController) {
+        /* 1. Surcharge portee par le plugin proprietaire du controleur.
+              ⚠️ PluginAdminController::getTemplatePath() ne prend PAS
+              d'argument, contrairement a Plugin::getTemplatePath($template) :
+              l'argument que passait l'ancienne redaction etait ignore. */
 
-            if (file_exists($this->_normalizeDirectory($this->getContext()->controller->getTemplatePath($template)) . $this->getTemplateDirectory() . $template)) {
-                return $this->_normalizeDirectory($this->getContext()->controller->getTemplatePath($template)) . $this->getTemplateDirectory() . $template;
+        if ($controller instanceof PluginAdminController) {
+            $pluginPath = $controller->getTemplatePath();
+
+            if (!empty($pluginPath)) {
+                $candidates[] = $this->_normalizeDirectory($pluginPath) . $directory . $template;
             }
 
-        } else
-
-        if ($this->getContext()->controller instanceof AdminController && isset($controllerName)
-            && file_exists($this->_normalizeDirectory($this->getContext()->smarty->getTemplateDir(0)) . 'controllers' . DIRECTORY_SEPARATOR . $controllerName . DIRECTORY_SEPARATOR . $this->getTemplateDirectory() . $template)) {
-            return $this->_normalizeDirectory($this->getContext()->smarty->getTemplateDir(0)) . 'controllers' . DIRECTORY_SEPARATOR . $controllerName . DIRECTORY_SEPARATOR . $this->getTemplateDirectory() . $template;
-        } else
-
-        if (file_exists($this->_normalizeDirectory($this->getContext()->smarty->getTemplateDir(1)) . $this->getTemplateDirectory() . $template)) {
-            return $this->_normalizeDirectory($this->getContext()->smarty->getTemplateDir(1)) . $this->getTemplateDirectory() . $template;
-        } else
-
-        if (file_exists($this->_normalizeDirectory($this->getContext()->smarty->getTemplateDir(0)) . $this->getTemplateDirectory() . $template)) {
-            return $this->_normalizeDirectory($this->getContext()->smarty->getTemplateDir(0)) . $this->getTemplateDirectory() . $template;
-        } else {
-            return $this->getTemplateDirectory() . $template;
         }
 
+        /* 2. Surcharge par controleur, sous <tpl0>/controllers/<dossier>/.
+              `override_folder` porte la convention reellement en usage dans le
+              socle (« piece_statuses/ ») ; l'ancienne heuristique ne retenait
+              que le deuxieme mot du nom de classe (« piece/ »), qui ne
+              correspond a aucun repertoire existant. On empile les deux : la
+              premiere est juste, la seconde preserve l'existant. */
+
+        if ($controller instanceof AdminController) {
+            $base = $this->_normalizeDirectory($context->smarty->getTemplateDir(0))
+            . 'controllers' . DIRECTORY_SEPARATOR;
+
+            if (!empty($controller->override_folder)) {
+                $candidates[] = $base . $this->_normalizeDirectory($controller->override_folder) . $directory . $template;
+            }
+
+            if (preg_match_all('/((?:^|[A-Z])[a-z]+)/', get_class($controller), $matches) && isset($matches[0][1])) {
+                $candidates[] = $base . strtolower($matches[0][1]) . DIRECTORY_SEPARATOR . $directory . $template;
+            }
+
+        }
+
+        /* 3. Repertoires de gabarits Smarty : la surcharge (index 1) avant le
+              socle (index 0), comme le faisait l'ancienne chaine. */
+
+        foreach ([1, 0] as $index) {
+            $dir = $context->smarty->getTemplateDir($index);
+
+            if (!empty($dir)) {
+                $candidates[] = $this->_normalizeDirectory($dir) . $directory . $template;
+            }
+
+        }
+
+        foreach ($candidates as $candidate) {
+
+            if (file_exists($candidate)) {
+                return $candidate;
+            }
+
+        }
+
+        /* Dernier recours : chemin relatif, que Smarty resoudra sur ses propres
+           repertoires. Jamais `null` — c'est tout l'objet du correctif. */
+
+        return $directory . $template;
     }
 
     /**

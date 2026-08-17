@@ -111,14 +111,116 @@ class PhenyxMailer {
 
     public function generatePostfield() {
 
+        /* ⚠️ `attachment` etait transmis TEL QUEL. Or les appelants modernes y
+           mettent un CHEMIN DE FICHIER — voir Subscription::envoyerCourriel()
+           et AdminCustomerPiecesController — alors que l'API Brevo attend une
+           liste de {content: base64, name: 'fichier.pdf'}. Le chemin partait
+           donc a Brevo, qui l'ignorait : le courriel arrivait sans sa facture,
+           et personne ne le voyait puisque l'envoi etait signale reussi.
+           C'est le defaut SYMETRIQUE de celui de la branche PHPMailer, qui
+           recevait la forme Brevo la ou elle attend un chemin. */
+
+        $pieces = [];
+
+        foreach ($this->attachmentList() as $piece) {
+
+            $pieces[] = [
+                'content' => chunk_split(base64_encode(
+                    $piece['path'] !== null ? (string) @file_get_contents($piece['path']) : $piece['content']
+                )),
+                'name'    => $piece['name'],
+            ];
+        }
+
         $this->postfields = [
             'sender'      => $this->sender,
             'to'          => $this->to,
             'cc'          => $this->cc,
             'subject'     => $this->subject,
             "htmlContent" => $this->htmlContent,
-            'attachment'  => $this->attachment,
+            'attachment'  => count($pieces) ? $pieces : null,
         ];
+    }
+
+    /**
+     * Normalise `$this->attachment`, quelle que soit la forme recue.
+     *
+     * Les appelants ecrivent indifferemment :
+     *   - un chemin de fichier             '/var/.../facture.pdf'
+     *   - une liste de chemins             ['/a.pdf', '/b.pdf']
+     *   - la forme Brevo                   [['content' => base64, 'name' => …]]
+     *   - une seule piece Brevo            ['content' => base64, 'name' => …]
+     *
+     * et les deux transports en attendent chacun une forme differente. Plutot
+     * que d'exiger des appelants qu'ils sachent lequel est actif — ils ne le
+     * savent pas, et c'est precisement le role de cette classe — on ramene tout
+     * ici a une representation unique, que chaque branche convertit ensuite.
+     *
+     * @return array liste de ['name', 'path'|null, 'content'|null, 'mime']
+     */
+    protected function attachmentList() {
+
+        if (empty($this->attachment)) {
+            return [];
+        }
+
+        $brut = $this->attachment;
+
+        /* Une seule piece Brevo, non enveloppee dans une liste. */
+
+        if (is_array($brut) && isset($brut['content'])) {
+            $brut = [$brut];
+        }
+
+        $sortie = [];
+
+        foreach ((array) $brut as $piece) {
+
+            if (is_array($piece) && isset($piece['content'])) {
+                $sortie[] = [
+                    'name'    => isset($piece['name']) ? $piece['name'] : 'piece-jointe',
+                    'path'    => null,
+                    /* `chunk_split()` a insere des sauts de ligne tous les 76
+                       caracteres : `base64_decode()` non strict les ignore. */
+                    'content' => base64_decode($piece['content']),
+                    'mime'    => isset($piece['mime']) ? $piece['mime'] : '',
+                ];
+
+                continue;
+            }
+
+            if (is_string($piece) && $piece !== '') {
+
+                if (is_readable($piece)) {
+                    $sortie[] = [
+                        'name'    => basename($piece),
+                        'path'    => $piece,
+                        'content' => null,
+                        'mime'    => '',
+                    ];
+
+                    continue;
+                }
+
+                /* ⚠️ NE PAS IGNORER EN SILENCE. Un courriel parti sans sa
+                   facture ne se voit pas : le destinataire ne reclame pas ce
+                   qu'il ne sait pas attendu. */
+
+                PhenyxLogger::addLog(
+                    'PhenyxMailer — piece jointe illisible, courriel envoye sans elle : ' . $piece,
+                    2
+                );
+
+                continue;
+            }
+
+            PhenyxLogger::addLog(
+                'PhenyxMailer — piece jointe ignoree, format non reconnu : ' . gettype($piece),
+                2
+            );
+        }
+
+        return $sortie;
     }
 
     public function send() {
@@ -209,6 +311,20 @@ class PhenyxMailer {
                 $mail->addAddress($value['email'], $value['name']);
             }
 
+            /* ⚠️ LE CC ETAIT PERDU. `generatePostfield()` le transmet a Brevo,
+               mais cette branche-ci ne l'ajoutait nulle part : tout envoi en
+               copie — l'accuse de commande au service commercial, par exemple —
+               ne partait qu'au client des lors que EPH_MAIL_METHOD valait
+               PHPMailer, sans que rien ne le signale. */
+
+            foreach ((array) $this->cc as $value) {
+
+                if (!empty($value['email'])) {
+                    $mail->addCC($value['email'], isset($value['name']) ? $value['name'] : '');
+                }
+
+            }
+
             $mail->Subject = $this->subject;
 
             if ($encrypt !== 'off') {
@@ -229,8 +345,14 @@ class PhenyxMailer {
             $mail->AltBody = trim(strip_tags($this->htmlContent)); // évite "no plaintext part" sur certains anti-spam
             $mail->isHTML(true);
 
-            if (isset($this->attachment) && !is_null($this->attachment)) {
-                $mail->addAttachment($this->attachment);
+            foreach ($this->attachmentList() as $piece) {
+
+                if ($piece['path'] !== null) {
+                    $mail->addAttachment($piece['path'], $piece['name']);
+                    continue;
+                }
+
+                $mail->addStringAttachment($piece['content'], $piece['name'], PHPMailer::ENCODING_BASE64, $piece['mime']);
             }
 
             // Fix #10 : capturer la réponse SMTP brute en cas d'erreur.

@@ -652,46 +652,11 @@ class PhenyxTools {
 		return $this->apiCall('checkLicence', []);
 	}
 
-	/**
-	 * Rafraichit le catalogue des plugins disponibles depuis ephenyx.io.
-	 *
-	 * ═══ LE PAYS PART AVEC LA DEMANDE (2026-08-16) ═══
-	 *
-	 * `iso_country` porte les pays d'immatriculation des societes du site. Il
-	 * permettra a ephenyx.io de ne servir que les plugins exploitables ici :
-	 * inutile de proposer `ph_sepa` a une boutique canadienne, ni `ph_learning`
-	 * hors de France.
-	 *
-	 * ⚠️ AUCUN FILTRAGE N'EST FAIT DE CE COTE-CI, ET C'EST STRUCTUREL. Les
-	 * entrees ecrites dans `plugin_sources.json` ne servent qu'aux plugins
-	 * ABSENTS du disque — `Plugin::getPluginsOnDisk()` retire du lot tous ceux
-	 * deja presents. Or `GeoScope` resout une portee en instanciant la classe
-	 * du plugin : pour un plugin qui n'est pas la, `getInstanceByName()` rend
-	 * `false`, la portee est vide, et « vide » signifie « aucune restriction ».
-	 * Un filtre local ici laisserait donc passer 100 % des entrees, toujours —
-	 * il aurait l'air de fonctionner sans rien faire.
-	 *
-	 * Le filtrage du catalogue appartient au serveur. Ce qui est prepare ici,
-	 * c'est sa moitie cliente : la question est posee, la reponse viendra.
-	 *
-	 * Un serveur qui ignore `iso_country` repond exactement comme avant.
-	 *
-	 * @return bool
-	 */
 	public function getPhenyxPlugins() {
 
 		$plugins = Plugin::getInstalledPluginsOnDisk();
 
-		$pays = [];
-
-		if (class_exists(GeoScope::class)) {
-			$pays = GeoScope::companyCountries();
-		}
-
-		$response = $this->apiCall('getPhenyxPlugins', [
-			'plugins'     => $plugins,
-			'iso_country' => $pays,
-		]);
+		$response = $this->apiCall('getPhenyxPlugins', ['plugins' => $plugins]);
 		$response = Tools::jsonDecode(Tools::jsonEncode($response), true);
 
 		if (is_array($response)) {

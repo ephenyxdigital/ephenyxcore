@@ -135,6 +135,7 @@ return [
     'FileLogger' => 'EphenyxDigital\\EphenyxCore\\FileLogger',
 	'Flags' => 'EphenyxDigital\\EphenyxCore\\Flags',
     'Gender' => 'EphenyxDigital\\EphenyxCore\\Gender',
+    'GeoScope' => 'EphenyxDigital\\EphenyxCore\\GeoScope',
     'GsiteMap' => 'EphenyxDigital\\EphenyxCore\\GsiteMap',
     'Helper' => 'EphenyxDigital\\EphenyxCore\\Helper',
     'HelperCalendar' => 'EphenyxDigital\\EphenyxCore\\HelperCalendar',

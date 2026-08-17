@@ -1,0 +1,827 @@
+<?php
+
+namespace EphenyxDigital\EphenyxCore;
+
+/**
+ * Portée géographique et linguistique d'un plugin.
+ *
+ * ⚠️ POSÉE LE 2026-08-16 — lot 0 du chantier « zone exécutable ».
+ *
+ * ------------------------------------------------------------------------
+ * POURQUOI UNE CLASSE À PART, ET RIEN DANS `Plugin`
+ *
+ * Aucune méthode n'est ajoutée à `Plugin`, alors qu'elle est juste à côté. Deux
+ * raisons, dont la seconde est la vraie.
+ *
+ * D'abord, un plugin déclare sa portée par une simple propriété publique
+ * `$geo_scope` sur SA PROPRE classe. PHP l'autorise sans que le parent la
+ * connaisse, et un plugin qui ne la déclare pas vaut « partout » — tout
+ * l'existant continue donc de fonctionner sans être touché.
+ *
+ * Ensuite, et c'est l'argument qui compte : aucune méthode ici ne consulte de
+ * contexte implicite. Le pays est TOUJOURS un paramètre. Une fonction qui
+ * devine son pays se comporte différemment en HTTP, en CLI et en tâche
+ * planifiée, et devient intestable. C'est exactement ce qui est arrivé à
+ * `Plugin::getPaymentPlugins()`, dont la restriction par pays ne s'applique
+ * jamais parce que `$frontend` est écrasé trois lignes avant la jointure.
+ *
+ * ------------------------------------------------------------------------
+ * CE QUE CETTE CLASSE N'EST PAS
+ *
+ * Elle ne remplace ni ne recouvre `plugin_country` / `$limited_countries`, qui
+ * vivent dans `ph_ecommerce` et répondent à une TOUTE AUTRE question :
+ *
+ *   plugin_country     → « depuis quel pays un CLIENT peut-il payer ainsi ? »
+ *                        front-office, évalué à la commande
+ *   GeoScope           → « dans quel pays un MARCHAND peut-il installer ça ? »
+ *                        back-office, évalué à l'installation
+ *
+ * Les deux sont légitimes, orthogonaux, et ne doivent pas être fusionnés. Le
+ * jour où quelqu'un proposera de « factoriser », c'est ce paragraphe qu'il faut
+ * lui opposer.
+ *
+ * ------------------------------------------------------------------------
+ * DÉCLARER UNE PORTÉE
+ *
+ *     public $geo_scope = null;                          // partout (défaut)
+ *     public $geo_scope = ['presets' => ['sepa']];
+ *     public $geo_scope = ['countries' => ['FR']];
+ *     public $geo_scope = ['countries' => ['FR','GP','MQ','GF','RE','YT']];
+ *     public $geo_scope = ['zones' => ['Europe'],
+ *                          'exclude_countries' => ['RU','BY']];
+ *
+ * Les trois clés s'unissent, puis `exclude_countries` retranche.
+ *
+ * Et pour la portée linguistique :
+ *
+ *     public $i18n_scope = null;                         // déduite du geo_scope
+ *     public $i18n_scope = ['fr','en','de','nl'];        // explicite
+ *
+ * ------------------------------------------------------------------------
+ * OUVERTURE EN CAS DE DÉCLARATION FAUTIVE
+ *
+ * Une déclaration qui ne résout RIEN — préréglage inconnu, zone renommée — est
+ * traitée comme « partout », et journalisée en niveau 3. C'est un choix
+ * délibéré : refuser l'installation d'un plugin légitime sur une faute de
+ * frappe coûte plus cher que d'en autoriser un qui ne servira pas. La portée
+ * est un garde-fou d'ergonomie, PAS une sécurité — rien ici ne doit être
+ * invoqué pour protéger quoi que ce soit.
+ *
+ * @since 2.2.0
+ */
+class GeoScope {
+
+    /** Valeur de `$geo_scope` signifiant « aucune restriction ». */
+    const WORLDWIDE = null;
+
+    /**
+     * Toujours proposée à la traduction, quelle que soit la portée.
+     *
+     * Un back-office français peut être tenu par un gestionnaire anglophone, et
+     * l'anglais sert de catalogue de repli. Un plugin qui veut s'en passer
+     * déclare `$i18n_strict = true` — voir computeI18n().
+     */
+    const LINGUA_FRANCA = 'en';
+
+    /** @var array Mémoïsation par requête. Voir flush(). */
+    protected static $cache = [];
+
+    /** @var array Anomalies du dernier appel à resolve() */
+    protected static $errors = [];
+
+    /**
+     * @var mixed Connexion aux tables `geo_*`.
+     *            null = pas encore tentée, false = tentée et échouée.
+     */
+    protected static $geoDb = null;
+
+    /* ------------------------------------------------------------------ */
+    /* La base de référence                                                */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Connexion aux trois tables `geo_*`, qui vivent dans une base UNIQUE
+     * partagée par tous les sites.
+     *
+     * ═══ POURQUOI UNE BASE À PART (2026-08-16) ═══
+     *
+     * `geo_preset`, `geo_preset_country` et `geo_country_lang` ne décrivent pas
+     * le site : elles décrivent le monde. La Serbie entre dans SEPA en mai 2026
+     * que le site le sache ou non. Les héberger dans chaque base fille imposait
+     * une livraison par site à chaque adhésion — exactement ce que le lot 5 du
+     * plan cherche à éviter. Une base de référence unique règle la question à la
+     * source.
+     *
+     * ⚠️ SEULES CES TROIS TABLES SONT CONCERNÉES. `company`, `country` et
+     * `zone` restent LOCALES : elles décrivent l'installation, pas le monde.
+     * Les sociétés de dev.nailalliance.fr ne sont pas dans la base de
+     * référence, et les zones sont une configuration par site. Router
+     * `companyCountries()` ou `zoneCountries()` vers la base centrale rendrait
+     * les sociétés d'un autre site, ou aucune — et `isAvailableIn()` deviendrait
+     * silencieusement faux.
+     *
+     * ═══ CE QUI SE PASSE SI ELLE EST INJOIGNABLE ═══
+     *
+     * Rien de visible. `geoQuery()` rend un tableau vide, la portée résolue est
+     * vide, et une portée vide signifie « aucune restriction » : tous les
+     * plugins redeviennent visibles et traduisibles partout. C'est la doctrine
+     * de la classe — un garde-fou d'ergonomie ne doit jamais mettre un
+     * back-office par terre. L'incident part au journal en niveau 3.
+     *
+     * Repli également si les constantes ne sont pas définies : on retombe sur
+     * la base locale, ce qui laisse fonctionner un site installé avant la
+     * bascule, avec ses propres tables `geo_*`.
+     */
+    protected static function geoDb() {
+
+        if (static::$geoDb !== null) {
+            return static::$geoDb;
+        }
+
+        $user = static::conf('_EPH_CRM_DB_USER_');
+        $base = static::conf('_EPH_CRM_DB_NAME_');
+        $serveur = static::conf('_EPH_CRM_DB_SERVER_');
+
+        if ($user === null || $base === null || $serveur === null) {
+            /* Pas de base de référence déclarée : les tables `geo_*` sont
+               attendues dans la base du site, comme avant la bascule. */
+            static::$geoDb = Db::getInstance();
+
+            return static::$geoDb;
+        }
+
+        try {
+            static::$geoDb = Db::getCrmInstance(
+                $user,
+                defined('_EPH_CRM_DB_PASSWD_') ? (string) _EPH_CRM_DB_PASSWD_ : '',
+                $base,
+                $serveur
+            );
+        } catch (\Throwable $e) {
+
+            PhenyxLogger::addLog(
+                'GeoScope — base de référence injoignable (' . $base . '@'
+                . $serveur . ') : ' . $e->getMessage()
+                . '. Toutes les portées sont traitées comme mondiales.',
+                3
+            );
+
+            static::$geoDb = false;
+        }
+
+        return static::$geoDb;
+    }
+
+    /**
+     * Interroge la base de référence. Rend [] plutôt que de laisser remonter
+     * une exception : voir la doctrine dans geoDb().
+     *
+     * ⚠️ Ne peut rien contre un `die()` du pilote. Si un jour la connexion
+     * échoue sans exception, c'est ici qu'il faudra regarder.
+     */
+    protected static function geoQuery($sql) {
+
+        $db = static::geoDb();
+
+        if (!$db) {
+            return [];
+        }
+
+        try {
+            return (array) $db->executeS($sql);
+        } catch (\Throwable $e) {
+
+            PhenyxLogger::addLog(
+                'GeoScope — lecture impossible dans la base de référence : ' . $e->getMessage()
+                . ' | ' . $sql,
+                3
+            );
+
+            /* On ne réessaie pas pour le reste de la requête : une base tombée
+               le reste, et soixante plugins feraient soixante tentatives. */
+            static::$geoDb = false;
+
+            return [];
+        }
+    }
+
+    /**
+     * Préfixe des tables de la base de référence. Rien n'oblige la base
+     * centrale à porter le même préfixe que le site ; la constante permet de
+     * les découpler, et vaut celui du site à défaut.
+     */
+    protected static function geoPrefix() {
+
+        $prefixe = static::conf('_EPH_CRM_DB_PREFIX_');
+
+        return $prefixe !== null ? $prefixe : _DB_PREFIX_;
+    }
+
+    /**
+     * Une constante définie ET renseignée, ou null.
+     *
+     * ⚠️ Tester `defined()` seul ne suffit pas, et comparer à `''` non plus.
+     * `settings.inc.php` définit ces constantes depuis `$_ENV` : une clé absente
+     * du `.env` produit `null`, pas la chaîne vide. Un `_EPH_CRM_DB_PREFIX_`
+     * défini à null aurait donné un préfixe vide, donc des requêtes sur
+     * `geo_preset` au lieu de `eph_geo_preset` — une table introuvable, et
+     * toutes les portées silencieusement ouvertes.
+     */
+    protected static function conf($nom) {
+
+        if (!defined($nom)) {
+            return null;
+        }
+
+        $valeur = (string) constant($nom);
+
+        return $valeur !== '' ? $valeur : null;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Résolution d'une déclaration                                        */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Résout une déclaration en ensemble de codes ISO alpha-2, en majuscules.
+     *
+     * @param  mixed $declaration null | array
+     * @return array Vide = aucune restriction.
+     */
+    public static function resolve($declaration) {
+
+        static::$errors = [];
+
+        if (empty($declaration)) {
+            return [];
+        }
+
+        if (!is_array($declaration)) {
+            static::$errors[] = 'Déclaration de portée ignorée : un tableau était attendu, '
+            . gettype($declaration) . ' reçu.';
+
+            return [];
+        }
+
+        $cle = md5(serialize($declaration));
+
+        if (isset(static::$cache[$cle])) {
+            static::$errors = static::$cache[$cle]['errors'];
+
+            return static::$cache[$cle]['isos'];
+        }
+
+        $isos = [];
+        $connues = ['presets', 'zones', 'countries', 'exclude_countries'];
+
+        foreach (array_keys($declaration) as $cleDeclaree) {
+
+            if (!in_array($cleDeclaree, $connues, true)) {
+                static::$errors[] = 'Clé de portée inconnue : « ' . $cleDeclaree . ' ». '
+                . 'Attendu : ' . implode(', ', $connues) . '.';
+            }
+
+        }
+
+        if (!empty($declaration['presets'])) {
+
+            foreach ((array) $declaration['presets'] as $code) {
+                $pays = static::preset($code);
+
+                if (empty($pays)) {
+                    static::$errors[] = 'Préréglage inconnu ou vide : « ' . $code . ' ».';
+                    continue;
+                }
+
+                $isos = array_merge($isos, $pays);
+            }
+
+        }
+
+        if (!empty($declaration['zones'])) {
+
+            foreach ((array) $declaration['zones'] as $zone) {
+                $pays = static::zoneCountries($zone);
+
+                if (empty($pays)) {
+                    static::$errors[] = 'Zone inconnue ou vide : « ' . $zone . ' ».';
+                    continue;
+                }
+
+                $isos = array_merge($isos, $pays);
+            }
+
+        }
+
+        if (!empty($declaration['countries'])) {
+
+            foreach ((array) $declaration['countries'] as $iso) {
+                $isos[] = static::normalizeIso($iso);
+            }
+
+        }
+
+        $isos = array_values(array_unique(array_filter($isos)));
+
+        /* Retranchement après union, jamais avant : `exclude` doit pouvoir
+           retirer un pays apporté par un préréglage. */
+
+        if (!empty($declaration['exclude_countries'])) {
+
+            $retires = array_map([static::class, 'normalizeIso'], (array) $declaration['exclude_countries']);
+            $isos = array_values(array_diff($isos, $retires));
+        }
+
+        /* ⚠️ Une déclaration non vide qui ne résout rien est une ERREUR DE
+           DÉCLARATION, pas une portée mondiale voulue. On ouvre quand même —
+           voir l'en-tête — mais bruyamment. Sans ce journal, un préréglage
+           renommé rendrait tous les plugins concernés installables partout,
+           sans que rien ne le signale. */
+
+        if (empty($isos)) {
+            static::$errors[] = 'La déclaration ne résout aucun pays : portée traitée comme mondiale.';
+
+            PhenyxLogger::addLog(
+                'GeoScope — déclaration non résolue, portée ouverte : ' . json_encode($declaration)
+                . ' | ' . implode(' ', static::$errors),
+                3
+            );
+        }
+
+        static::$cache[$cle] = ['isos' => $isos, 'errors' => static::$errors];
+
+        return $isos;
+    }
+
+    /** Anomalies du dernier `resolve()`. */
+    public static function getErrors() {
+
+        return static::$errors;
+    }
+
+    /**
+     * Portée d'un plugin, qu'on lui passe l'objet ou son nom.
+     *
+     * La propriété est lue en canard : `Plugin` ne la déclare pas, et c'est
+     * volontaire (voir l'en-tête). Un plugin qui ne la déclare pas vaut
+     * WORLDWIDE, donc tout l'existant continue de fonctionner à l'identique.
+     */
+    public static function ofPlugin($plugin) {
+
+        $objet = static::pluginObject($plugin);
+
+        if (!$objet || !isset($objet->geo_scope)) {
+            return [];
+        }
+
+        return static::resolve($objet->geo_scope);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Recevabilité                                                        */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Ce plugin est-il recevable dans ce(s) pays ?
+     *
+     * @param mixed $plugin objet ou nom
+     * @param mixed $isos   null = pays d'ancrage du plugin ; string ; array
+     */
+    public static function isAvailableIn($plugin, $isos = null) {
+
+        $portee = static::ofPlugin($plugin);
+
+        if (empty($portee)) {
+            return true;
+        }
+
+        if ($isos === null) {
+            $isos = static::anchorCountriesFor($plugin);
+        }
+
+        $isos = array_map([static::class, 'normalizeIso'], (array) $isos);
+
+        /* Aucun pays d'ancrage connu — société non renseignée, jeu de données
+           incomplet. On ne bloque pas sur une information absente. */
+
+        if (empty(array_filter($isos))) {
+            return true;
+        }
+
+        /* UNION, décision du 16/08 : recevable dès qu'UNE société est dans la
+           portée. En multi-société, un plugin visible mais inutile à l'une
+           d'elles est moins grave qu'un plugin absent sans explication. La
+           liste des sociétés hors portée est rendue par outOfScopeCountries(),
+           pour l'avertissement. */
+
+        return count(array_intersect($isos, $portee)) > 0;
+    }
+
+    /** Ceux des pays fournis qui sont HORS portée. Sert à l'avertissement. */
+    public static function outOfScopeCountries($plugin, $isos = null) {
+
+        $portee = static::ofPlugin($plugin);
+
+        if (empty($portee)) {
+            return [];
+        }
+
+        if ($isos === null) {
+            $isos = static::anchorCountriesFor($plugin);
+        }
+
+        $isos = array_filter(array_map([static::class, 'normalizeIso'], (array) $isos));
+
+        return array_values(array_diff($isos, $portee));
+    }
+
+    /**
+     * Pourquoi ce n'est pas recevable, en français, pour l'administrateur.
+     * Rend '' quand ça l'est.
+     */
+    public static function refusal($plugin, $isos = null) {
+
+        if (static::isAvailableIn($plugin, $isos)) {
+            return '';
+        }
+
+        $objet = static::pluginObject($plugin);
+        $nom = $objet && !empty($objet->displayName) ? $objet->displayName : static::pluginName($plugin);
+
+        if ($isos === null) {
+            $isos = static::anchorCountriesFor($plugin);
+        }
+
+        $isos = array_filter(array_map([static::class, 'normalizeIso'], (array) $isos));
+        $portee = static::ofPlugin($plugin);
+
+        return sprintf(
+            '%s ne s\'installe que dans %d pays (%s%s). Cette installation est rattachée à : %s.',
+            $nom,
+            count($portee),
+            implode(', ', array_slice($portee, 0, 8)),
+            count($portee) > 8 ? '…' : '',
+            $isos ? implode(', ', $isos) : 'aucun pays renseigné'
+        );
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Pays d'ancrage                                                      */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Le ou les pays au regard desquels ce plugin doit être jugé.
+     *
+     * Par défaut, le pays d'immatriculation de chaque société. Un plugin peut
+     * répondre autrement en implémentant `geoAnchorCountry()` — décision du
+     * 16/08. Le cas qui l'a motivée : pour `ph_sepa`, ce qui compte n'est ni
+     * l'immatriculation ni la facturation, mais le pays du COMPTE CRÉANCIER,
+     * qui se lit dans les deux premières lettres de `SEPA_COMPANY_IBAN`. Un
+     * marchand immatriculé en France peut prélever depuis un IBAN allemand.
+     */
+    public static function anchorCountriesFor($plugin) {
+
+        $objet = static::pluginObject($plugin);
+
+        if ($objet && method_exists($objet, 'geoAnchorCountry')) {
+
+            $iso = $objet->geoAnchorCountry();
+
+            if (!empty($iso)) {
+                return array_filter(array_map([static::class, 'normalizeIso'], (array) $iso));
+            }
+
+            /* Une réponse vide n'est pas une erreur : le plugin dit « je n'ai
+               pas d'avis », par exemple parce qu'il n'est pas encore
+               configuré. On retombe sur les sociétés. */
+        }
+
+        return static::companyCountries();
+    }
+
+    /**
+     * Pays d'immatriculation de toutes les sociétés, en ISO alpha-2.
+     */
+    public static function companyCountries() {
+
+        if (isset(static::$cache['__companies'])) {
+            return static::$cache['__companies'];
+        }
+
+        /* ⚠️ BASE LOCALE, et surtout pas la base de référence : les sociétés
+           de CE site n'existent que dans SA base. */
+        $rows = Db::getInstance()->executeS(
+            'SELECT DISTINCT c.`iso_code`
+               FROM `' . _DB_PREFIX_ . 'company` co
+               INNER JOIN `' . _DB_PREFIX_ . 'country` c ON c.`id_country` = co.`id_country_registration`'
+        );
+
+        $isos = [];
+
+        foreach ((array) $rows as $r) {
+            $isos[] = static::normalizeIso($r['iso_code']);
+        }
+
+        static::$cache['__companies'] = array_values(array_unique(array_filter($isos)));
+
+        return static::$cache['__companies'];
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Portée linguistique                                                 */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * Codes ISO de langue pertinents pour ce plugin. Vide = toutes.
+     *
+     * `$i18n_scope` explicite s'il est déclaré ; sinon déduction depuis la
+     * portée géographique via `geo_country_lang`, plus l'anglais, toujours — un
+     * back-office français peut être exploité par un gestionnaire anglophone,
+     * et un plugin franco-français a besoin de son `en.php`.
+     */
+    public static function resolveI18n($plugin) {
+
+        /* Memoisation : l'ecran de traduction appelle isTranslatableIn() une
+           fois par plugin ET par appel a getListPlugins() — trois fois par
+           rendu. Sans cela, langsForCountries() emet une requete a chaque
+           passage, soit pres de deux cents pour un site a soixante plugins. */
+        $cle = 'i18n:' . static::pluginName($plugin);
+
+        if (array_key_exists($cle, static::$cache)) {
+            return static::$cache[$cle];
+        }
+
+        static::$cache[$cle] = static::computeI18n($plugin);
+
+        return static::$cache[$cle];
+    }
+
+    /**
+     * Corps de resolveI18n(), hors memoisation.
+     *
+     * ═══ LA LINGUA FRANCA, ET COMMENT S'EN PASSER (2026-08-16) ═══
+     *
+     * L'anglais est ajouté à toute portée résolue, par défaut. Conséquence
+     * visible à l'écran : aucun plugin n'est jamais retiré de la traduction
+     * anglaise, quelle que soit sa zone. C'est voulu — mais ça gonfle le
+     * compteur de « manquantes » quand les expressions SOURCES sont déjà en
+     * anglais, ce qui est le cas de la quasi-totalité du catalogue : les 178
+     * « manquantes » de `ph_learning` en anglais ne sont pas des traductions
+     * absentes, ce sont des chaînes sources sans doublon.
+     *
+     * Un plugin qui veut une portée linguistique prise AU PIED DE LA LETTRE
+     * déclare, à côté de sa portée :
+     *
+     *     public $i18n_scope  = ['fr'];
+     *     public $i18n_strict = true;      // n'ajoute rien, pas même l'anglais
+     *
+     * La propriété est lue en canard, comme `$geo_scope` et `$i18n_scope` :
+     * `Plugin` ne la déclare pas, et son absence vaut `false`. Aucun plugin
+     * existant ne change de comportement.
+     *
+     * `$i18n_strict` s'applique aux deux voies — portée déclarée ET portée
+     * déduite des pays. Sur un plugin `france` sans `$i18n_scope`, il ramène la
+     * portée au seul français.
+     */
+    protected static function computeI18n($plugin) {
+
+        $objet = static::pluginObject($plugin);
+        $strict = ($objet && !empty($objet->i18n_strict));
+
+        if ($objet && !empty($objet->i18n_scope)) {
+
+            $isos = array_map('strtolower', (array) $objet->i18n_scope);
+
+            if (!$strict) {
+                $isos[] = static::LINGUA_FRANCA;
+            }
+
+            return array_values(array_unique($isos));
+        }
+
+        $pays = static::ofPlugin($plugin);
+
+        if (empty($pays)) {
+            return [];
+        }
+
+        $langues = static::langsForCountries($pays);
+
+        if (empty($langues)) {
+            /* Table `geo_country_lang` incomplète pour ces pays : ne restreindre
+               rien plutôt que de restreindre au hasard. */
+            return [];
+        }
+
+        if (!$strict) {
+            $langues[] = static::LINGUA_FRANCA;
+        }
+
+        return array_values(array_unique($langues));
+    }
+
+    /** Langues officielles d'un ensemble de pays, via `geo_country_lang`. */
+    public static function langsForCountries(array $isosPays) {
+
+        $isosPays = array_filter(array_map([static::class, 'normalizeIso'], $isosPays));
+
+        if (empty($isosPays)) {
+            return [];
+        }
+
+        /* Pas de pSQL ici : normalizeIso() a déjà garanti `[A-Z]{2}` pour
+           chaque code, et array_filter a retiré le reste. C'est aussi plus
+           juste — pSQL échappe avec la connexion LOCALE, alors que la
+           requête part sur la base de référence. */
+        $liste = "'" . implode("','", $isosPays) . "'";
+
+        $rows = static::geoQuery(
+            'SELECT DISTINCT `iso_lang`
+               FROM `' . static::geoPrefix() . 'geo_country_lang`
+              WHERE `iso_country` IN (' . $liste . ')'
+        );
+
+        $out = [];
+
+        foreach ((array) $rows as $r) {
+            $out[] = strtolower($r['iso_lang']);
+        }
+
+        return array_values(array_unique(array_filter($out)));
+    }
+
+    /**
+     * Ce plugin se traduit-il dans cette langue ?
+     *
+     * Utilisé par l'écran de traduction (lot 4). Rendu permissif par
+     * construction : une portée vide autorise tout.
+     */
+    public static function isTranslatableIn($plugin, $isoLang) {
+
+        $portee = static::resolveI18n($plugin);
+
+        if (empty($portee)) {
+            return true;
+        }
+
+        return in_array(strtolower(substr((string) $isoLang, 0, 2)), $portee, true);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Préréglages et zones                                                */
+    /* ------------------------------------------------------------------ */
+
+    /** Pays d'un préréglage nommé. Vide si inconnu. */
+    public static function preset($code) {
+
+        $code = strtolower(trim((string) $code));
+
+        /* Liste blanche plutôt qu'échappement : le code vient d'une déclaration
+           `$geo_scope` écrite à la main dans un plugin, et il sert de clé dans
+           une requête qui part sur une AUTRE connexion que celle de pSQL(). Un
+           code réduit à `[a-z0-9_-]` retire la question. */
+        $code = preg_replace('/[^a-z0-9_-]/', '', $code);
+
+        if ($code === '') {
+            return [];
+        }
+
+        if (isset(static::$cache['preset_' . $code])) {
+            return static::$cache['preset_' . $code];
+        }
+
+        $rows = static::geoQuery(
+            'SELECT `iso_code` FROM `' . static::geoPrefix() . 'geo_preset_country`
+              WHERE `code` = \'' . $code . '\''
+        );
+
+        $isos = [];
+
+        foreach ((array) $rows as $r) {
+            $isos[] = static::normalizeIso($r['iso_code']);
+        }
+
+        static::$cache['preset_' . $code] = array_values(array_unique(array_filter($isos)));
+
+        return static::$cache['preset_' . $code];
+    }
+
+    /** Tous les préréglages, avec leur effectif. Pour l'écran et le rapport. */
+    public static function presets() {
+
+        return static::geoQuery(
+            'SELECT p.`code`, p.`name`, p.`source`, p.`updated_at`, COUNT(pc.`iso_code`) AS nb
+               FROM `' . static::geoPrefix() . 'geo_preset` p
+               LEFT JOIN `' . static::geoPrefix() . 'geo_preset_country` pc ON pc.`code` = p.`code`
+              GROUP BY p.`code`
+              ORDER BY p.`code`'
+        );
+    }
+
+    /**
+     * Pays d'une zone, désignée par son nom ou son identifiant.
+     *
+     * ⚠️ Les zones d'Ephenyx sont des zones FISCALES ET LOGISTIQUES — elles
+     * servent au calcul de TVA et aux frais de port. Les employer pour une
+     * portée métier fonctionne, mais expose à ce qu'un redécoupage motivé par
+     * la livraison change la portée des plugins. Préférer un préréglage dès que
+     * la liste a un sens réglementaire.
+     */
+    public static function zoneCountries($zone) {
+
+        $cle = 'zone_' . strtolower((string) $zone);
+
+        if (isset(static::$cache[$cle])) {
+            return static::$cache[$cle];
+        }
+
+        $condition = is_numeric($zone)
+        ? 'z.`id_zone` = ' . (int) $zone
+        : 'z.`name` = \'' . pSQL(trim((string) $zone)) . '\'';
+
+        /* ⚠️ BASE LOCALE : les zones sont une configuration par site. */
+        $rows = Db::getInstance()->executeS(
+            'SELECT c.`iso_code`
+               FROM `' . _DB_PREFIX_ . 'country` c
+               INNER JOIN `' . _DB_PREFIX_ . 'zone` z ON z.`id_zone` = c.`id_zone`
+              WHERE ' . $condition
+        );
+
+        $isos = [];
+
+        foreach ((array) $rows as $r) {
+            $isos[] = static::normalizeIso($r['iso_code']);
+        }
+
+        static::$cache[$cle] = array_values(array_unique(array_filter($isos)));
+
+        return static::$cache[$cle];
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Utilitaires                                                         */
+    /* ------------------------------------------------------------------ */
+
+    /**
+     * ⚠️ La table `country` d'Ephenyx déclare `iso_code` en `size => 3` et
+     * `validate => isLanguageIsoCode`, alors que la norme employée est bien
+     * ISO 3166-1 ALPHA-2. On tronque donc à deux caractères plutôt que de faire
+     * confiance à la longueur du champ.
+     */
+    public static function normalizeIso($iso) {
+
+        $iso = strtoupper(trim((string) $iso));
+
+        return preg_match('/^[A-Z]{2}$/', substr($iso, 0, 2)) ? substr($iso, 0, 2) : '';
+    }
+
+    /** Vide la mémoïsation. À appeler après toute modification des tables. */
+    public static function flush() {
+
+        static::$cache = [];
+        static::$errors = [];
+
+        /* La connexion est relâchée elle aussi : après un échec, static::$geoDb
+           vaut false et plus rien n'est jamais lu. flush() rend donc sa chance
+           à la base de référence — utile pour une tâche longue, un script CLI
+           ou un traitement par lots. Db::getCrmInstance() met de toute façon
+           ses connexions en cache par (serveur|base|utilisateur) : on ne rouvre
+           pas de socket pour autant. */
+        static::$geoDb = null;
+    }
+
+    /**
+     * Rend l'objet plugin, qu'on ait reçu l'objet, un nom, ou un item de liste.
+     * Rend null si le plugin ne peut pas être instancié — ce n'est pas une
+     * erreur : la liste du catalogue contient des plugins absents du disque.
+     */
+    protected static function pluginObject($plugin) {
+
+        if (is_object($plugin)) {
+
+            /* Un item de liste (stdClass) porte les propriétés sans être un
+               Plugin. Il fait très bien l'affaire : on ne lit que geo_scope,
+               i18n_scope et displayName. */
+
+            return $plugin;
+        }
+
+        if (!is_string($plugin) || $plugin === '') {
+            return null;
+        }
+
+        $objet = Plugin::getInstanceByName($plugin);
+
+        return is_object($objet) ? $objet : null;
+    }
+
+    protected static function pluginName($plugin) {
+
+        if (is_object($plugin)) {
+            return isset($plugin->name) ? $plugin->name : get_class($plugin);
+        }
+
+        return (string) $plugin;
+    }
+
+}

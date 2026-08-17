@@ -4667,8 +4667,77 @@ FileETag none
                 $mail->Body = $postfields['htmlContent'];
                 $mail->isHTML(true);
 
-                if (isset($postfields['attachment']) && !is_null($postfields['attachment'])) {
-                    $mail->addAttachment($postfields['attachment']);
+                /* ⚠️ CORRIGE LE 2026-08-16 — toute commande avec facture jointe
+                   echouait en exception.
+
+                   Le code appelait `addAttachment($postfields['attachment'])`.
+                   Or ce tableau est au format BREVO — une LISTE de
+                   ['content' => base64, 'name' => 'fichier.pdf'] — parce que la
+                   branche `mail_method == 2`, quelques lignes plus bas, se
+                   contente d'un `json_encode($postfields)` vers api.brevo.com,
+                   dont c'est exactement la charge utile documentee. Les
+                   appelants construisent donc pour Brevo (voir
+                   PaymentPlugin::validateOrder ligne 760).
+
+                   PHPMailer::addAttachment(), lui, attend UN CHEMIN DE FICHIER.
+                   Recevant le tableau, il tombait sur
+                     « preg_match(): Argument #2 ($subject) must be of type
+                       string, array given »
+                   dans isPermittedPath(). Symptome cote client : la validation
+                   de commande partait en exception, la commande etait pourtant
+                   enregistree, et l'accuse de reception n'arrivait jamais.
+
+                   On traduit ici plutot que chez les appelants : ils sont
+                   nombreux, la forme Brevo est la bonne pour l'autre branche,
+                   et c'est bien cette methode qui doit savoir parler aux deux
+                   transports. Un simple chemin reste accepte. */
+
+                if (!empty($postfields['attachment'])) {
+
+                    foreach ((array) $postfields['attachment'] as $piece) {
+
+                        if (is_array($piece) && isset($piece['content'])) {
+
+                            /* `chunk_split()` a insere un saut de ligne tous les
+                               76 caracteres : `base64_decode()` non strict les
+                               ignore. Le type reste vide quand il n'est pas
+                               fourni, PHPMailer le deduit de l'extension. */
+
+                            $mail->addStringAttachment(
+                                base64_decode($piece['content']),
+                                isset($piece['name']) ? $piece['name'] : 'piece-jointe',
+                                PHPMailer::ENCODING_BASE64,
+                                isset($piece['mime']) ? $piece['mime'] : ''
+                            );
+
+                            continue;
+                        }
+
+                        if (is_string($piece) && $piece !== '') {
+
+                            if (is_file($piece)) {
+                                $mail->addAttachment($piece);
+                                continue;
+                            }
+
+                            /* ⚠️ NE PAS IGNORER EN SILENCE. Un courriel parti
+                               sans sa facture ne se voit pas : le client ne
+                               reclame pas ce qu'il ne sait pas attendu. */
+
+                            PhenyxLogger::addLog(
+                                'Tools::sendEmail — piece jointe introuvable, courriel envoye sans elle : ' . $piece,
+                                2
+                            );
+
+                            continue;
+                        }
+
+                        PhenyxLogger::addLog(
+                            'Tools::sendEmail — piece jointe ignoree, format non reconnu : ' . gettype($piece),
+                            2
+                        );
+                    }
+
                 }
 
                 if (!$mail->send()) {
