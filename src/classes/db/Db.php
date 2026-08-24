@@ -278,7 +278,26 @@ abstract class Db {
             );
             $connection = static::$instance[$idServer];
 
-            $connection->setTimeZone(Tools::getTimeZone());
+            /*
+             * Fuseau horaire lu DIRECTEMENT sur la connexion fraîche, et non via
+             * Tools::getTimeZone() → Configuration::getInstance()->get().
+             *
+             * Ce premier getInstance() de Db survient pendant le chargement initial
+             * de la configuration (Configuration::__construct → get() →
+             * loadConfigurationFromDB → DbQuery::from → bqSQL → Db::getInstance) :
+             * le singleton Configuration n'étant pas encore assigné, l'appel en
+             * construisait un DEUXIÈME, qui rechargeait toute la table — la requête
+             * de 1653 lignes partait deux fois par processus (constaté par
+             * instrumentation, backtrace à l'appui). Une lecture unitaire de la
+             * seule clef EPH_TIMEZONE brise le cycle ; le repli sur le fuseau PHP
+             * est le même que celui de Tools::getTimeZone().
+             */
+            $fuseau = $connection->getValue(
+                'SELECT `value` FROM `' . _DB_PREFIX_ . 'configuration` WHERE `name` = \'EPH_TIMEZONE\'',
+                false
+            );
+
+            $connection->setTimeZone($fuseau ? $fuseau : date_default_timezone_get());
         }
 
         return static::$instance[$idServer];

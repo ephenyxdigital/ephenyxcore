@@ -78,6 +78,7 @@ class License extends PhenyxObjectModel {
     public $master_shop = 0;
     public $iso_langs = [];
     public $plugins = [];
+	public $themes = [];
     public $rdb;
     public $autoupdate;
     public $has_device;
@@ -114,6 +115,7 @@ class License extends PhenyxObjectModel {
             'has_cron'     => ['type' => self::TYPE_BOOL, 'validate' => 'isBool'],
             'iso_langs'    => ['type' => self::TYPE_STRING, 'copy_post' => false],
             'plugins'      => ['type' => self::TYPE_STRING, 'copy_post' => false],
+			'themes'      => ['type' => self::TYPE_STRING, 'copy_post' => false],
             'autoupdate'   => ['type' => self::TYPE_BOOL, 'validate' => 'isBool'],
             'rdb'          => ['type' => self::TYPE_INT],
             'date_add'     => ['type' => self::TYPE_DATE, 'validate' => 'isDate', 'copy_post' => false],
@@ -149,6 +151,10 @@ class License extends PhenyxObjectModel {
             if (!empty($this->plugins) && Validate::isJSON($this->plugins)) {
                 $this->plugins = $this->context->_tools->jsonDecode($this->plugins, true);
             }
+			
+			 if (!empty($this->themes) && Validate::isJSON($this->themes)) {
+                $this->themes = $this->context->_tools->jsonDecode($this->themes, true);
+            }
 
             $this->partner_firstname = $partner->firstname;
             $this->partner_lastname  = $partner->lastname;
@@ -172,6 +178,10 @@ class License extends PhenyxObjectModel {
 
         if (!empty($objectData['plugins']) && Validate::isJSON($objectData['plugins'])) {
             $objectData['plugins'] = Tools::jsonDecode($objectData['plugins'], true);
+        }
+		
+		if (!empty($objectData['themes']) && Validate::isJSON($objectData['themes'])) {
+            $objectData['themes'] = Tools::jsonDecode($objectData['themes'], true);
         }
 
         $string                    = $objectData['purchase_key'] . '/' . $objectData['website'];
@@ -206,6 +216,10 @@ class License extends PhenyxObjectModel {
         if (is_array($this->plugins)) {
             $this->plugins = Tools::jsonEncode($this->plugins);
         }
+		
+		if (is_array($this->themes)) {
+            $this->themes = Tools::jsonEncode($this->themes);
+        }
 
         return parent::add($autoDate, true);
     }
@@ -218,6 +232,10 @@ class License extends PhenyxObjectModel {
 
         if (is_array($this->plugins)) {
             $this->plugins = Tools::jsonEncode($this->plugins);
+        }
+		
+		if (is_array($this->themes)) {
+            $this->themes = Tools::jsonEncode($this->themes);
         }
 
         return parent::update(true);
@@ -687,6 +705,8 @@ class License extends PhenyxObjectModel {
      */
     public function generateReferenceFiles() {
 		
+		$excludes = [];
+		
         if (Validate::isJSON($this->iso_langs)) {
             $this->iso_langs = Tools::jsonDecode($this->iso_langs, true);
         }
@@ -695,6 +715,19 @@ class License extends PhenyxObjectModel {
             $this->plugins = Tools::jsonDecode($this->plugins, true);
         }
 		
+		if (Validate::isJSON($this->themes)) {
+            $this->themes = Tools::jsonDecode($this->themes, true);
+        }
+		
+		foreach($this->themes as $theme) {
+			if ($theme === 'phenyx-theme-default') {
+				continue;
+        	}
+			foreach (['css', 'fonts', 'font', 'img', 'js', 'plugins', 'pdf', 'mail', 'docs'] as $sub) {
+            	$excludes[] = '/' . $theme . '/' . $sub . '/';
+        	}
+		}
+				
         $recursive_directory = [
             'app/xml',
             'content/css',
@@ -772,6 +805,8 @@ class License extends PhenyxObjectModel {
 			if (str_contains($filePath, 'uploads/revslider')) {
                 continue;
             }
+			
+			
 
             if (is_dir($file->getPathname())) {
                 continue;
@@ -798,6 +833,21 @@ class License extends PhenyxObjectModel {
             if (str_contains($filePath, 'custom_') && $ext == 'css') {
                 continue;
             }
+			
+			
+			$skip = false;
+
+        	foreach ($excludes as $exclude) {
+
+            	if (str_contains($filePath, $exclude)) {
+                	$skip = true;
+                	break;
+            	}
+			}
+
+        	if ($skip) {
+            	continue;
+        	}
 			
             if (str_contains($filePath, '/plugins/') && str_contains($filePath, '/translations/')) {
 				
@@ -857,6 +907,7 @@ class License extends PhenyxObjectModel {
             $lic = new License($licence->id);
             $lic->getInstalledLangs(true);
             $lic->getPluginOnDisk(true);
+			$lic->getInstalledThemes(true);
         }
     }
 
@@ -1046,6 +1097,35 @@ class License extends PhenyxObjectModel {
 
         if (is_string($this->iso_langs)) {
             $this->iso_langs = Tools::jsonDecode($this->iso_langs, true);
+        }
+    }
+	
+	public function getInstalledThemes($force = false) {
+
+        if (!$force && $this->isRemoteSyncFresh()) {
+
+            if (is_string($this->themes)) {
+                $this->themes = Tools::jsonDecode($this->themes, true);
+            }
+
+            return;
+        }
+
+        $themes = $this->callApi('getInstalledThemes', [], 60);
+
+        if (is_array($themes)) {
+            $this->themes = $themes;
+            $this->update();
+        } elseif ($langs !== null) {
+            PhenyxLogger::addLog(
+                'License::getInstalledLangs — réponse inattendue du site ' . $this->website
+                . ' (id_license ' . $this->id . ') : ' . var_export($themes, true),
+                2, null, 'License', $this->id
+            );
+        }
+
+        if (is_string($this->themes)) {
+            $this->themes = Tools::jsonDecode($this->themes, true);
         }
     }
 

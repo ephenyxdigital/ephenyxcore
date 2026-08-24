@@ -214,7 +214,10 @@ class Company extends PhenyxObjectModel {
 		if ($idCompany) {
             $this->id = $idCompany;
             $entityMapper = Adapter_ServiceLocator::get("Adapter_EntityMapper");
-            $entityMapper->load($this->id, null, $this, $this->def, false);
+            // Cache objet activé : la même société était relue en base à chaque
+            // new Company() — six fois par page au profilage. Le mapper garde la
+            // ligne en mémoire de processus et chaque instance reste distincte.
+            $entityMapper->load($this->id, null, $this, $this->def, true);
             $this->setUrl();
             $this->multi_domain = $this->isMultiDomain();
 			$this->country = Country::getNameById($this->context->phenyxConfig->get('EPH_LANG_DEFAULT'), $this->id_country_registration);
@@ -353,17 +356,26 @@ class Company extends PhenyxObjectModel {
 			$isMainUri = false;
 			$host = Context::getContext()->_tools->getHttpHost();
 			$requestUri = rawurldecode($_SERVER['REQUEST_URI']);
-			
-			$result = Db::getInstance(_EPH_USE_SQL_SLAVE_)->executeS(
-				(new DbQuery())
-					->select('c.`id_company`, CONCAT(cu.`physical_uri`, cu.`virtual_uri`) AS `uri`, cu.`domain`, cu.`main`')
-					->from('company_url', 'cu')
-					->leftJoin('company', 'c', 'c.`id_company` = cu.`id_company`')
-					->where('cu.domain = \'' . pSQL($host) . '\' OR cu.domain_ssl = \'' . pSQL($host) . '\'')
-					->where('c.`active` = 1')
-					->where('c.`deleted` = 0')
-					->orderBy('LENGTH(CONCAT(cu.`physical_uri`, cu.`virtual_uri`)) DESC')
-			);
+
+			// La résolution domaine → société ne dépend que de l'hôte : inutile
+			// de repartir en base à chaque initialize() (six fois par page au
+			// profilage), le résultat est mémoïsé pour la durée du processus.
+			static $memoResolution = [];
+
+			if (!array_key_exists($host, $memoResolution)) {
+				$memoResolution[$host] = Db::getInstance(_EPH_USE_SQL_SLAVE_)->executeS(
+					(new DbQuery())
+						->select('c.`id_company`, CONCAT(cu.`physical_uri`, cu.`virtual_uri`) AS `uri`, cu.`domain`, cu.`main`')
+						->from('company_url', 'cu')
+						->leftJoin('company', 'c', 'c.`id_company` = cu.`id_company`')
+						->where('cu.domain = \'' . pSQL($host) . '\' OR cu.domain_ssl = \'' . pSQL($host) . '\'')
+						->where('c.`active` = 1')
+						->where('c.`deleted` = 0')
+						->orderBy('LENGTH(CONCAT(cu.`physical_uri`, cu.`virtual_uri`)) DESC')
+				);
+			}
+
+			$result = $memoResolution[$host];
 
 			$through = false;
 

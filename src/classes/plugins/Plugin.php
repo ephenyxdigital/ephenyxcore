@@ -122,6 +122,10 @@ abstract class Plugin {
     public $config_controller = null;
     /** @var string Admin tab corresponding to the plugin */
     public $tab = null;
+	
+	public $geo_scope = null;
+	
+	public $i18n_scope = null;
     /** @var bool Status */
     public $active = false;
     /** @var bool Is the plugin certified */
@@ -202,6 +206,8 @@ abstract class Plugin {
     private $services;
 
     public $_session;
+	
+	public $conflicts = [];
 
     public $_translations;
 
@@ -373,6 +379,46 @@ abstract class Plugin {
 
         $this->ajax = Tools::getValue('ajax') || Tools::isSubmit('ajax');
 
+    }
+	
+	protected function checkConflicts() {
+
+        $found = [];
+
+        foreach ($this->conflicts as $name) {
+            if (Plugin::isInstalled($name)) {
+                $found[] = $name;
+            }
+        }
+
+        if (!empty($found)) {
+            $this->_errors[] = sprintf(
+                $this->l('%1$s cannot be installed alongside %2$s: they declare the same classes. Uninstall the older plugin first — its tables are left untouched and remain available for migration.'),
+                $this->name,
+                implode(', ', $found)
+            );
+
+            return false;
+        }
+
+        return true;
+    }
+	
+	 /**
+     * Meta tables in this codebase are stubs holding nothing but the primary
+     * key; plugins graft their columns on with alterSqlTable(). Create the
+     * stub if it is missing so the ALTER below has something to bite on.
+     */
+    protected function ensureMetaTable($table, $primary) {
+
+        Db::getInstance()->execute(
+            'CREATE TABLE IF NOT EXISTS `' . _DB_PREFIX_ . bqSQL($table) . '_meta` ('
+            . '`' . bqSQL($primary) . '` int(10) UNSIGNED NOT NULL,'
+            . 'PRIMARY KEY (`' . bqSQL($primary) . '`)'
+            . ') ENGINE=' . _MYSQL_ENGINE_ . ' DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+        );
+
+        return true;
     }
 
     public function getTranslations() {
@@ -3113,8 +3159,18 @@ abstract class Plugin {
                 $_PLUG = $_LANGFRONT;
                 $PhenyxShopKey = trim($source . $key);
 
+                /* ⚠️ `$PhenyxShopKeyFile` — une variable qui n'existe NULLE PART.
+                   Le test portait sur la bonne cle, la lecture sur une variable
+                   indefinie : `translateWord(..., 'front', $source)` rendait donc
+                   null precisement quand la traduction EXISTAIT, et la chaine
+                   source quand elle n'existait pas. Le cas « traduit » etait le
+                   seul en echec, ce qui est le pire profil : la fonction avait
+                   l'air de marcher tant que rien n'etait traduit.
+                   Les quatre autres branches de ce switch lisent bien
+                   `$PhenyxShopKey`. Corrige le 2026-08-17. */
+
                 if (!empty($_PLUG[$PhenyxShopKey])) {
-                    $ret = stripslashes($_PLUG[$PhenyxShopKeyFile]);
+                    $ret = stripslashes($_PLUG[$PhenyxShopKey]);
                 } else {
                     $ret = $string;
                 }

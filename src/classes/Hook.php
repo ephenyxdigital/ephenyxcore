@@ -814,16 +814,58 @@ class Hook extends PhenyxObjectModel {
 
     public function getHookPluginExecList($hookName = null) {
 
-        $context = Context::getContext();
+        
         $list    = null;
+
+        /*
+         * ═══ POURQUOI CETTE REQUETE PARTAIT 85 FOIS PAR PAGE ═══
+         *
+         * Releve du profilage front-office du 2026-08-21, onglet « Double » :
+         * 85 executions de la meme requete sur un seul affichage, chacune avec
+         * tri de fichiers ET table temporaire, pour 440 lignes.
+         *
+         * Le cache existait pourtant. Le defaut est dans sa CLEF, qui portait
+         * $hookName — alors que le jeu de resultats, lui, n'en depend pas.
+         *
+         * Hors hooks de paiement, la requete construite plus bas est en effet
+         * rigoureusement identique quel que soit le hook demande : elle ramene
+         * TOUS les couples hook/plugin, et c'est le filtrage par nom qui a lieu
+         * ensuite, en PHP, a la fin de cette meme methode.
+         *
+         * Chaque nom de hook rencontre sur la page ouvrait donc une entree de
+         * cache distincte, manquait a son premier appel, et relancait la meme
+         * requete pour reconstruire la meme liste. Autant de requetes que de
+         * hooks affiches.
+         *
+         * Deux corrections, dans le meme geste :
+         *
+         *  1. La clef ne porte plus $hookName hors paiement, mais un libelle
+         *     fixe. Une seule entree partagee au lieu d'une par hook.
+         *
+         *  2. Un memo statique evite meme le passage par l'API de cache et sa
+         *     serialisation JSON quand la liste a deja ete construite dans
+         *     cette requete HTTP.
+         *
+         * ⚠️ Les hooks de paiement restent volontairement en dehors des deux :
+         * leur requete depend du pays, de la devise et du transporteur, et la
+         * methode les a toujours recalcules a chaque appel — voir la condition
+         * de reconstruction juste en dessous, inchangee.
+         */
+        $estHookPaiement = ($hookName == 'displayPayment' || $hookName == 'displayPaymentEU');
+
+        static $memoStandard = null;
+
+        if (!$estHookPaiement && $memoStandard !== null) {
+            $list = $memoStandard;
+        }
 
         // Fix #4: $cacheId was only defined inside the cache-enabled branch but
         // used later in an unconditional putData() call → Undefined variable.
         // Initialised to null here so it is always defined.
         $cacheId = null;
 
-        if ($this->context->cache_enable && is_object($this->context->cache_api)) {
-            $cacheId = 'hook_plugin_exec_list_' . $hookName . ((isset($this->context->user->id)) ? '_' . $this->context->user->id : '') . static::suffixeCache();
+        if (is_null($list) && $this->context->cache_enable && is_object($this->context->cache_api)) {
+            $cacheId = 'hook_plugin_exec_list_' . ($estHookPaiement ? $hookName : 'standard') . ((isset($this->context->user->id)) ? '_' . $this->context->user->id : '') . static::suffixeCache();
             $value   = $this->context->cache_api->getData($cacheId, 3600);
             $temp    = empty($value) ? null : Tools::jsonDecode($value, true);
 
@@ -833,12 +875,12 @@ class Hook extends PhenyxObjectModel {
 
         }
 
-        if (is_null($list) || $hookName == 'displayPayment' || $hookName == 'displayPaymentEU') {
+        if (is_null($list) || $estHookPaiement) {
             $frontend = true;
             $groups = [];
             $useGroups = Group::isFeatureActive();
 
-            if (isset($context->employee)) {
+            if (isset($this->context->employee)) {
                 $frontend = false;
             } else {
                 // Get groups list
@@ -846,7 +888,7 @@ class Hook extends PhenyxObjectModel {
                 if ($useGroups) {
 
                     if (isset($this->context->user) && $this->context->user->isLogged()) {
-                        $groups = $context->user->getGroups();
+                        $groups = $this->context->user->getGroups();
                     } else
 
                     if (isset($this->context->user) && $this->context->user->isLogged(true)) {
@@ -865,7 +907,7 @@ class Hook extends PhenyxObjectModel {
             $sql->from('plugin', 'm');
             $sql->innerJoin('hook_plugin', 'hm', 'hm.`id_plugin` = m.`id_plugin`');
             $sql->innerJoin('hook', 'h', 'hm.`id_hook` = h.`id_hook`');
-            $sql->where('m.enable_device & ' . (int) Context::getContext()->getDevice());
+            $sql->where('m.enable_device & ' . (int) $this->context->getDevice());
             $sql->where('m.active = 1');
 
             if ($hookName != 'displayPayment' && $hookName != 'displayPaymentEU') {
@@ -877,19 +919,53 @@ class Hook extends PhenyxObjectModel {
 
             if ($frontend) {
 
+                /**
+                 * ⚠️ UNE TABLE DE RESTRICTION VIDE NE VEUT PAS DIRE « TOUT INTERDIT ».
+                 *
+                 * Ces trois filtres exigeaient une ligne dans `plugin_country`,
+                 * `plugin_currency` et `plugin_carrier` pour laisser passer un module
+                 * de paiement. Or RIEN dans le socle n ecrit dans `plugin_currency` ni
+                 * dans `plugin_carrier` - aucune insertion nulle part - et l unique
+                 * ecriture dans `plugin_country` (Country::addPluginRestrictions())
+                 * boucle sur un tableau `$companys` qu elle ne remplit jamais quand il
+                 * arrive vide : elle n insere donc rien elle non plus.
+                 *
+                 * Resultat : les trois sous-requetes rendaient NULL, la comparaison
+                 * etait fausse, et AUCUN module de paiement ne sortait jamais -
+                 * « Aucun moyen de paiement disponible ». Personne ne l avait vu parce
+                 * que ce bloc levait une erreur fatale avant d arriver la (le `$$this`
+                 * corrige juste au-dessus) : il n avait jamais tourne.
+                 *
+                 * L absence de restriction se lit « pas de restriction », pas
+                 * « interdit partout ». Le filtre ne s applique donc qu aux modules qui
+                 * ont EFFECTIVEMENT des lignes de restriction - ce qui rend la
+                 * fonctionnalite utilisable le jour ou l on en configure.
+                 */
                 if (Validate::isLoadedObject($this->context->country)) {
-                    $sql->where('((h.`name` = "displayPayment" OR h.`name` = "displayPaymentEU") AND (SELECT `id_country` FROM `' . _DB_PREFIX_ . 'plugin_country` mc WHERE mc.`id_plugin` = m.`id_plugin` AND `id_country` = ' . (int) $context->country->id . '  LIMIT 1) = ' . (int) $this->context->country->id . ')');
+                    $idCountry = (int) $this->context->country->id;
+                    $sql->where('((h.`name` = "displayPayment" OR h.`name` = "displayPaymentEU") AND ('
+                        . 'NOT EXISTS (SELECT 1 FROM `' . _DB_PREFIX_ . 'plugin_country` mc0 WHERE mc0.`id_plugin` = m.`id_plugin`)'
+                        . ' OR (SELECT `id_country` FROM `' . _DB_PREFIX_ . 'plugin_country` mc WHERE mc.`id_plugin` = m.`id_plugin` AND mc.`id_country` = ' . $idCountry . ' LIMIT 1) = ' . $idCountry
+                        . '))');
                 }
 
                 if (Validate::isLoadedObject($this->context->currency)) {
-                    $sql->where('((h.`name` = "displayPayment" OR h.`name` = "displayPaymentEU") AND (SELECT `id_currency` FROM `' . _DB_PREFIX_ . 'plugin_currency` mcr WHERE mcr.`id_plugin` = m.`id_plugin` AND `id_currency` IN (' . (int) $context->currency->id . ', -1, -2) LIMIT 1) IN (' . (int) $this->context->currency->id . ', -1, -2))');
+                    $idCurrency = (int) $this->context->currency->id;
+                    $sql->where('((h.`name` = "displayPayment" OR h.`name` = "displayPaymentEU") AND ('
+                        . 'NOT EXISTS (SELECT 1 FROM `' . _DB_PREFIX_ . 'plugin_currency` mcr0 WHERE mcr0.`id_plugin` = m.`id_plugin`)'
+                        . ' OR (SELECT `id_currency` FROM `' . _DB_PREFIX_ . 'plugin_currency` mcr WHERE mcr.`id_plugin` = m.`id_plugin` AND mcr.`id_currency` IN (' . $idCurrency . ', -1, -2) LIMIT 1) IN (' . $idCurrency . ', -1, -2)'
+                        . '))');
                 }
 
                 if (Validate::isLoadedObject($this->context->cart)) {
                     $carrier = new Carrier($this->context->cart->id_carrier);
 
                     if (Validate::isLoadedObject($carrier)) {
-                        $sql->where('((h.`name` = "displayPayment" OR h.`name` = "displayPaymentEU") AND (SELECT `id_reference` FROM `' . _DB_PREFIX_ . 'plugin_carrier` mcar WHERE mcar.`id_plugin` = m.`id_plugin` AND `id_reference` = ' . (int) $carrier->id_reference . ' LIMIT 1) = ' . (int) $carrier->id_reference . ')');
+                        $idReference = (int) $carrier->id_reference;
+                        $sql->where('((h.`name` = "displayPayment" OR h.`name` = "displayPaymentEU") AND ('
+                            . 'NOT EXISTS (SELECT 1 FROM `' . _DB_PREFIX_ . 'plugin_carrier` mcar0 WHERE mcar0.`id_plugin` = m.`id_plugin`)'
+                            . ' OR (SELECT `id_reference` FROM `' . _DB_PREFIX_ . 'plugin_carrier` mcar WHERE mcar.`id_plugin` = m.`id_plugin` AND mcar.`id_reference` = ' . $idReference . ' LIMIT 1) = ' . $idReference
+                            . '))');
                     }
 
                 }
@@ -900,6 +976,17 @@ class Hook extends PhenyxObjectModel {
 
                 if ($useGroups) {
                     $sql->leftJoin('plugin_group', 'mg', 'mg.`id_plugin` = m.`id_plugin`');
+
+                    // Un client sans ligne dans `customer_group` rend un tableau VIDE,
+                    // ce qui produit `IN ()` : erreur SQL 1064, et la page de paiement
+                    // tombe. On retombe sur le groupe client configure plutot que de
+                    // construire une requete invalide.
+                    $groups = array_filter(array_map('intval', (array) $groups), function ($g) { return $g > 0; });
+
+                    if (empty($groups)) {
+                        $fallback = (int) $this->context->phenyxConfig->get('EPH_CUSTOMER_GROUP');
+                        $groups   = [$fallback > 0 ? $fallback : (int) $this->context->phenyxConfig->get('EPH_UNIDENTIFIED_GROUP')];
+                    }
 
                     $sql->where('mg.`id_group` IN (' . implode(', ', $groups) . ')');
 
@@ -937,6 +1024,16 @@ class Hook extends PhenyxObjectModel {
         if ($this->context->cache_enable && is_object($this->context->cache_api) && $cacheId !== null) {
             $temp = $list === null ? null : Tools::jsonEncode($list);
             $this->context->cache_api->putData($cacheId, $temp);
+        }
+
+        /*
+         * Memo pour le reste de la requete HTTP. Place ici, apres la
+         * construction et apres l'ecriture en cache, mais AVANT le filtrage
+         * par nom de hook qui suit : c'est bien la liste complete que l'on
+         * garde, celle que tous les hooks se partagent.
+         */
+        if (!$estHookPaiement && $list !== null) {
+            $memoStandard = $list;
         }
 
         // If hook_name is given, just get list of plugins for this hook

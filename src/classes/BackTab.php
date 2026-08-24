@@ -385,7 +385,42 @@ class BackTab extends PhenyxObjectModel {
 					continue;
 				}
 
-				$classes[$definition['class']] = BackTab::resolvePublicName($definition, $definitions);
+				// ⚠️ LA CLE EST LE NOM DE ROUTAGE, PAS LE NOM DE CLASSE DECLARE.
+				//
+				// C'est cette cle qui devient `$_TABS['...']` dans
+				// <plugin>/translations/<iso>/tab.php, et c'est sous cette meme
+				// cle que `Plugin::translateWord($s, $lang, 'tab', $source)` ira
+				// la relire a l'installation — avec pour `$source` ce que le
+				// plugin passe a `installPluginTab()`, c'est-a-dire
+				// « AdminBillofPayment », jamais « AdminBillofPaymentControllerCore ».
+				//
+				// Or un fichier de plugin declare `class XControllerCore`, l'alias
+				// `XController` etant fabrique par PhenyxAutoload — et seulement
+				// pour un plugin INSTALLE. L'analyse statique lit donc le nom
+				// suffixe, et la cle ecrite ne correspondait a rien :
+				//
+				//   plugin non installe  ->  $_TABS['AdminBillofPaymentControllerCore']
+				//   plugin installe      ->  translateWord(..., 'AdminBillofPayment')
+				//
+				// Consequence : le libelle saisi AVANT l'installation etait perdu
+				// A l'installation, l'onglet reprenait sa chaine anglaise, et
+				// l'ecran de traduction affichait deux entrees pour un seul
+				// onglet — l'une suffixee, l'autre non — selon que le plugin
+				// etait installe ou pas.
+
+				$routing = BackTab::routingClassName($definition['class']);
+
+				// Collision : deux fichiers du meme plugin peuvent se reduire au
+				// meme nom de routage — un `XControllerCore` et un `XController`
+				// qui n'etend pas son Core, donc non ecarte par
+				// isOverrideController(). La declaration `Core` est la canonique :
+				// c'est elle que PhenyxAutoload aliasera. On ne l'ecrase pas.
+
+				if (isset($classes[$routing]) && substr($definition['class'], -4) !== 'Core') {
+					continue;
+				}
+
+				$classes[$routing] = BackTab::resolvePublicName($definition, $definitions);
 
 			}
 
@@ -886,6 +921,66 @@ class BackTab extends PhenyxObjectModel {
 	 * @return bool
 
 	 */
+
+	/**
+	 * Nom de ROUTAGE d'un controleur, a partir du nom de classe declare.
+	 *
+	 * ── LA REGLE, ET POURQUOI ELLE TIENT EN DEUX LIGNES ────────────────────
+	 *
+	 * Le fork suit une convention unique : un fichier de controleur declare
+	 * `class XControllerCore`, et `PhenyxAutoload` fabrique `class XController
+	 * extends XControllerCore`. Le nom par lequel on ROUTE, celui que porte
+	 * `back_tab.class_name`, que `installPluginTab()` recoit et que
+	 * `translateWord(..., 'tab', $source)` cherche, est `X` — sans suffixe.
+	 *
+	 * Les deux suffixes sont retires dans cet ordre, et l'ordre compte :
+	 * retirer `Controller` d'abord laisserait `XCore`.
+	 *
+	 * Un nom qui ne porte aucun des deux suffixes est rendu tel quel : ce n'est
+	 * pas une anomalie a corriger, seulement un controleur nomme autrement.
+	 *
+	 * @param string $class Nom de classe declare, ex. `AdminBillofPaymentControllerCore`
+	 *
+	 * @return string Nom de routage, ex. `AdminBillofPayment`
+	 */
+	public static function routingClassName($class) {
+
+		$class = (string) $class;
+
+		foreach (['ControllerCore', 'Controller'] as $suffixe) {
+
+			$longueur = strlen($suffixe);
+
+			if (strlen($class) > $longueur && substr($class, -$longueur) === $suffixe) {
+				return substr($class, 0, -$longueur);
+			}
+
+		}
+
+		return $class;
+	}
+
+	/**
+	 * Cles historiques sous lesquelles un libelle d'onglet a pu etre enregistre.
+	 *
+	 * ⚠️ INDISPENSABLE POUR NE PAS PERDRE LE TRAVAIL DEJA FAIT. Les fichiers
+	 * tab.php ecrits avant la correction du 2026-08-17 portent la cle suffixee.
+	 * Sans ce repli, la correction aurait « perdu » toutes les traductions
+	 * d'onglets de plugins non installes — techniquement elles seraient encore
+	 * dans le fichier, mais plus personne ne les lirait, ce qui revient au meme
+	 * pour celui qui les a saisies.
+	 *
+	 * Le repli est en LECTURE seulement : l'ecriture se fait sous la cle de
+	 * routage, si bien qu'un simple enregistrement remet le fichier d'aplomb.
+	 *
+	 * @param string $routing Nom de routage
+	 *
+	 * @return array
+	 */
+	public static function legacyTabKeys($routing) {
+
+		return [$routing . 'ControllerCore', $routing . 'Controller'];
+	}
 
 	protected static function isOverrideController(array $definition) {
 

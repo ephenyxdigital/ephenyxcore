@@ -524,19 +524,89 @@ abstract class PhenyxObjectModel implements Core_Foundation_Database_EntityInter
        
         $results = Db::getInstance()->getRow($sql);
         if (is_null($id_lang) && isset($def['multilang']) && $def['multilang']) {
+            /*
+             * ═══ UNE REQUETE PAR LANGUE ET PAR CHAMP (corrige le 2026-08-21) ═══
+             *
+             * Ce bloc lancait une requete pour CHAQUE couple langue × champ
+             * traduisible. Sur un site a onze langues, charger un simple pays
+             * — deux champs traduits, `name` et `generated` — coutait donc
+             * vingt-deux requetes.
+             *
+             * Releve du profilage front-office, onglet « Double » : `generated`
+             * onze fois, `name` onze fois, sur `eph_country_lang` seul. Et le
+             * meme motif se retrouvait sur `group_lang`, `gender_lang`, `lang`
+             * — tout ce qui passe par ce chargeur.
+             *
+             * Une seule requete suffit : on ramene toutes les lignes de
+             * <table>_lang pour cet objet, puis on repartit en PHP par
+             * id_lang. Vingt-deux requetes deviennent une.
+             *
+             * ⚠️ TROIS COMPORTEMENTS A PRESERVER A L'IDENTIQUE, verifies par
+             * simulation sur la matrice complete champ × langue :
+             *
+             *  · getValue() renvoie FALSE quand aucune ligne n'existe pour une
+             *    langue. Le pre-remplissage ci-dessous le reproduit — sans lui,
+             *    la clef serait absente au lieu de valoir false ;
+             *
+             *  · une valeur de colonne NULL doit rester NULL, et non devenir
+             *    false : getValue() ne les confond pas, array_key_exists non
+             *    plus ;
+             *
+             *  · seules les langues ACTIVES etaient parcourues. Une ligne
+             *    presente en base pour une langue desactivee n'etait jamais
+             *    lue : on l'ignore donc explicitement.
+             */
             $fieldLangs = self::getFieldLangs($def);
-           
+
+            $isoParLangue = [];
+
             foreach (Language::getLanguages(true) as $lang) {
-                foreach($fieldLangs as $fieldLang) {
-                    $sql = new DbQuery();
-                    $sql->select('`'.$fieldLang.'`');
-                    $sql->from($def['table'] . '_lang');
-                    $sql->where(bqSQL($def['primary']) .'='. $id);
-                    $sql->where('id_lang = '.$lang['id_lang']);
-                    $results[$fieldLang][$lang['iso_code']] = Db::getInstance()->getValue($sql);
-                }
+                $isoParLangue[(int) $lang['id_lang']] = $lang['iso_code'];
             }
-            
+
+            // Pre-remplissage : reproduit le false rendu par getValue() pour
+            // une langue active depourvue de ligne dans <table>_lang.
+            foreach ($isoParLangue as $isoCode) {
+
+                foreach ($fieldLangs as $fieldLang) {
+                    $results[$fieldLang][$isoCode] = false;
+                }
+
+            }
+
+            $sqlLangs = new DbQuery();
+            $sqlLangs->select('*');
+            $sqlLangs->from($def['table'] . '_lang');
+            $sqlLangs->where(bqSQL($def['primary']) . ' = ' . (int) $id);
+
+            $lignesLangs = Db::getInstance()->executeS($sqlLangs);
+
+            if (is_array($lignesLangs)) {
+
+                foreach ($lignesLangs as $ligneLang) {
+
+                    if (!isset($ligneLang['id_lang'])) {
+                        continue;
+                    }
+
+                    $idLangLigne = (int) $ligneLang['id_lang'];
+
+                    // Langue desactivee : l'ancien code ne la lisait pas.
+                    if (!isset($isoParLangue[$idLangLigne])) {
+                        continue;
+                    }
+
+                    foreach ($fieldLangs as $fieldLang) {
+
+                        if (array_key_exists($fieldLang, $ligneLang)) {
+                            $results[$fieldLang][$isoParLangue[$idLangLigne]] = $ligneLang[$fieldLang];
+                        }
+
+                    }
+
+                }
+
+            }
 
         }
         

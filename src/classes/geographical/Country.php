@@ -91,24 +91,28 @@ class Country extends PhenyxObjectModel {
 		return PhenyxTool::getInstance()->jsonDecode(PhenyxTool::getInstance()->jsonEncode($objectData));
 	}
 
+	/** @var array Devise par pays, mémoïsée : relue huit fois par page au profilage. */
+	protected static $memoNomDevise = [];
+
 	public function getCurencyName() {
 
-		return Db::getInstance(_EPH_USE_SQL_SLAVE_)->getValue(
-			(new DbQuery())
-				->select('name')
-				->from('country_currency')
-				->where('`id_country` = ' . $this->id)
-		);
+		return static::getStaticCurencyName($this->id);
 	}
 
 	public static function getStaticCurencyName($id) {
 
-		return Db::getInstance(_EPH_USE_SQL_SLAVE_)->getValue(
-			(new DbQuery())
-				->select('name')
-				->from('country_currency')
-				->where('`id_country` = ' . $id)
-		);
+		$id = (int) $id;
+
+		if (!array_key_exists($id, static::$memoNomDevise)) {
+			static::$memoNomDevise[$id] = Db::getInstance(_EPH_USE_SQL_SLAVE_)->getValue(
+				(new DbQuery())
+					->select('name')
+					->from('country_currency')
+					->where('`id_country` = ' . $id)
+			);
+		}
+
+		return static::$memoNomDevise[$id];
 	}
 
 	/**

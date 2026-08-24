@@ -643,6 +643,40 @@ class Performer {
 
     public function loadRoutes() {
 
+        /*
+         * Les règles de routes traduites (EPH_ROUTE_*) sont préchargées ICI en
+         * UNE requête ciblée, au lieu de phenyxConfig->get(clef, langue) dans la
+         * boucle : chaque première demande d'une langue déclenchait le
+         * chargement de TOUTES les traductions de configuration de cette langue
+         * (~1600 lignes) — onze fois par requête HTTP, constaté au profilage.
+         * Sémantique identique : valeur traduite si elle existe, sinon null et
+         * addRoute() retombe sur la règle par défaut, exactement comme get()
+         * dont le filet de sécurité renvoyait value_lang (donc NULL en
+         * l'absence de traduction). Les autres lecteurs de configuration
+         * traduite gardent le chargement à la demande.
+         */
+        $reglesTraduites = [];
+        $clefsCanoniques = array_values($this->canonical_routes);
+
+        if (count($clefsCanoniques)) {
+            $lignesRegles = Db::getInstance(_EPH_USE_SQL_SLAVE_)->executeS(
+                (new DbQuery())
+                    ->select('c.`name`, cl.`id_lang`, cl.`value_lang`')
+                    ->from('configuration', 'c')
+                    ->innerJoin('configuration_lang', 'cl', 'c.`id_configuration` = cl.`id_configuration`')
+                    ->where('c.`name` IN (\'' . implode("', '", array_map('pSQL', $clefsCanoniques)) . '\')')
+            );
+
+            if (is_array($lignesRegles)) {
+
+                foreach ($lignesRegles as $ligneRegle) {
+                    $reglesTraduites[(int) $ligneRegle['id_lang']][$ligneRegle['name']] = $ligneRegle['value_lang'];
+                }
+
+            }
+
+        }
+
         foreach (Language::getLanguages() as $lang) {
 
             foreach ($this->default_routes as $id => $route) {
@@ -654,7 +688,8 @@ class Performer {
                 $rule = null;
 
                 if (array_key_exists($id, $this->canonical_routes)) {
-                    $rule = $this->context->phenyxConfig->get($this->canonical_routes[$id], (int) $lang['id_lang']);
+                    $clefRegle = $this->canonical_routes[$id];
+                    $rule = isset($reglesTraduites[(int) $lang['id_lang']][$clefRegle]) ? $reglesTraduites[(int) $lang['id_lang']][$clefRegle] : null;
                 }
 
                 $this->addRoute(
@@ -672,13 +707,52 @@ class Performer {
 
         if ($this->use_routes) {
 
-            $results = Db::getInstance(_EPH_USE_SQL_SLAVE_)->executeS(
-                (new DbQuery())
-                    ->select('m.`page`, m.`controller`, m.`plugin`, ml.`url_rewrite`, ml.`id_lang`')
-                    ->from('meta', 'm')
-                    ->leftJoin('meta_lang', 'ml', 'm.`id_meta` = ml.`id_meta` ')
-                    ->orderBy('LENGTH(ml.`url_rewrite`) DESC')
-            );
+            /*
+             * Les routes réécrites viennent de eph_meta × eph_meta_lang : ~2100
+             * lignes triées par ORDER BY LENGTH(url_rewrite) DESC — un tri de
+             * fichiers qu'aucun index ne peut servir, payé à CHAQUE requête HTTP.
+             *
+             * Le résultat ne change que lorsqu'une meta change : on le met donc
+             * en cache (Redis/CacheApi), et Meta::add(), update() et delete()
+             * retirent la clef. La clef porte _DB_NAME_ car le backend Redis ne
+             * préfixe pas ses clefs par site : deux boutiques sur la même base
+             * Redis se marcheraient dessus sinon. L'ordre du tri est préservé
+             * par la sérialisation. Sans cache actif, comportement inchangé.
+             */
+            $results = null;
+            $cacheApi = null;
+            $contexte = Context::getContext();
+
+            if (isset($contexte->cache_enable) && $contexte->cache_enable
+                && isset($contexte->cache_api) && is_object($contexte->cache_api)
+            ) {
+                $cacheApi = $contexte->cache_api;
+                $enCache = $cacheApi->getData('routesMeta_' . _DB_NAME_);
+
+                if (is_array($enCache)) {
+                    $results = $enCache;
+                }
+
+            }
+
+            if ($results === null) {
+                $results = Db::getInstance(_EPH_USE_SQL_SLAVE_)->executeS(
+                    (new DbQuery())
+                        ->select('m.`page`, m.`controller`, m.`plugin`, ml.`url_rewrite`, ml.`id_lang`')
+                        ->from('meta', 'm')
+                        ->leftJoin('meta_lang', 'ml', 'm.`id_meta` = ml.`id_meta` ')
+                        ->orderBy('LENGTH(ml.`url_rewrite`) DESC')
+                );
+
+                if (!is_array($results)) {
+                    $results = [];
+                }
+
+                if ($cacheApi !== null && count($results)) {
+                    $cacheApi->putData('routesMeta_' . _DB_NAME_, $results, 86400);
+                }
+
+            }
 
             foreach ($results as $row) {
 

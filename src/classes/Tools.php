@@ -1121,7 +1121,32 @@ class Tools {
         @include_once _EPH_TRANSLATIONS_DIR_ . $context->language->iso_code . '/errors.php';
 
         if (defined('_EPH_MODE_DEV_') && _EPH_MODE_DEV_ && $string == 'Fatal error') {
-            return ('<pre>' . print_r(debug_backtrace(), true) . '</pre>');
+            /* ⚠️ CETTE LIGNE TUAIT LE PROCESSUS AVANT D'AVOIR RIEN AFFICHE.
+             *
+             * debug_backtrace() embarque par defaut les ARGUMENTS de chaque
+             * appel : Context, Smarty, Db, jeux de resultats entiers. print_r()
+             * les deroule recursivement, et l'on meurt en OOM (« tried to
+             * allocate 534 Mo ») a l'endroit meme cense expliquer l'erreur.
+             * Resultat : en mode developpement, toute erreur banale devenait
+             * une page blanche et un message de memoire sans rapport.
+             *
+             * On ne lit de toute facon ici que le CHEMIN d'appel. IGNORE_ARGS
+             * le donne pour quelques kilo-octets. */
+            $pileAppel = [];
+
+            foreach (debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 25) as $rang => $appel) {
+                $pileAppel[] = sprintf(
+                    '#%-2d %s%s%s()  %s:%s',
+                    $rang,
+                    isset($appel['class']) ? $appel['class'] : '',
+                    isset($appel['type']) ? $appel['type'] : '',
+                    isset($appel['function']) ? $appel['function'] : '',
+                    isset($appel['file']) ? $appel['file'] : '-',
+                    isset($appel['line']) ? $appel['line'] : '-'
+                );
+            }
+
+            return '<pre>' . htmlspecialchars(implode("\n", $pileAppel), ENT_QUOTES, 'UTF-8') . '</pre>';
         }
 
         if (!is_array($_ERRORS)) {

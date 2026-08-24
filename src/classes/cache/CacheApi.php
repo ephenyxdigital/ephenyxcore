@@ -32,6 +32,13 @@ abstract class CacheApi {
 
 	protected $keys = [];
 
+	/**
+	 * Plafond du cache local, et taille de la tranche evincee lorsqu'il est
+	 * atteint. Voir store() pour le detail du choix.
+	 */
+	const LOCAL_MAX_ENTREES = 10000;
+	const LOCAL_EVICTION = 2500;
+
 	protected static $local = [];
 
 	/**
@@ -293,12 +300,38 @@ abstract class CacheApi {
 
 	public static function store($key, $value) {
 
-		// PHP is not efficient at storing array
-		// Better delete the whole cache if there are
-		// more than 1000 elements in the array
-
-		if (count(CacheApi::$local) > 1000) {
-			CacheApi::$local = [];
+		/*
+		 * ─── LE CACHE SE VIDAIT ENTIEREMENT (corrige le 2026-08-21) ───
+		 *
+		 * Le code d'origine purgeait la TOTALITE du cache local des qu'il
+		 * depassait 1000 entrees :
+		 *
+		 *     if (count(CacheApi::$local) > 1000) {
+		 *         CacheApi::$local = [];
+		 *     }
+		 *
+		 * Deux defauts s'y cumulaient.
+		 *
+		 * Le seuil d'abord. Une page categorie de ce site emet 1125 requetes :
+		 * le plafond etait donc franchi EN COURS DE RENDU, et tout ce qui
+		 * avait deja ete mis en cache repartait en base. Le mecanisme
+		 * s'effondrait precisement sur les pages qui en avaient le plus besoin,
+		 * et il annulait en partie les correctifs qui s'appuient sur lui.
+		 *
+		 * La politique d'eviction ensuite. Tout jeter est le pire choix
+		 * possible : les entrees les plus sollicitees — configuration, groupes
+		 * de taxes, modeles d'objets — disparaissaient avec le reste.
+		 *
+		 * On releve donc le plafond a dix fois la page la plus lourde observee,
+		 * et on n'evince plus qu'une tranche : les entrees les plus anciennes,
+		 * PHP conservant l'ordre d'insertion des tableaux. Trois quarts du
+		 * cache survivent a une eviction, au lieu de rien.
+		 *
+		 * Le test isset() evite d'evincer pour rien lorsqu'on ne fait que
+		 * reecrire une clef deja presente : le tableau ne grandit pas.
+		 */
+		if (!isset(CacheApi::$local[$key]) && count(CacheApi::$local) >= static::LOCAL_MAX_ENTREES) {
+			CacheApi::$local = array_slice(CacheApi::$local, static::LOCAL_EVICTION, null, true);
 		}
 
 		CacheApi::$local[$key] = $value;

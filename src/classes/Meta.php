@@ -77,6 +77,8 @@ class Meta extends PhenyxObjectModel {
 
             if ($this->context->cache_enable && is_object($this->context->cache_api)) {
                 $this->context->cache_api->cleanByStartingKey('metaGetPages_');
+                // Une meta ajoutée peut porter une nouvelle route réécrite.
+                $this->context->cache_api->removeData('routesMeta_' . _DB_NAME_);
             }
 
         }
@@ -92,6 +94,8 @@ class Meta extends PhenyxObjectModel {
 
             if ($this->context->cache_enable && is_object($this->context->cache_api)) {
                 $this->context->cache_api->cleanByStartingKey('metaGetPages_');
+                // url_rewrite modifiée = table des routes à reconstruire.
+                $this->context->cache_api->removeData('routesMeta_' . _DB_NAME_);
             }
 
             Tools::generateHtaccess();
@@ -1197,6 +1201,14 @@ class Meta extends PhenyxObjectModel {
 
         if (!parent::delete()) {
             return false;
+        }
+
+        // Même invalidation que add()/update() — delete() ne purgeait AUCUN des
+        // deux caches jusqu'ici : une meta supprimée restait routable (et listée
+        // par metaGetPages_) jusqu'à l'expiration du TTL.
+        if ($this->context->cache_enable && is_object($this->context->cache_api)) {
+            $this->context->cache_api->cleanByStartingKey('metaGetPages_');
+            $this->context->cache_api->removeData('routesMeta_' . _DB_NAME_);
         }
 
         return Tools::generateHtaccess();

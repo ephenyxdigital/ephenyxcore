@@ -5,7 +5,20 @@ namespace EphenyxDigital\EphenyxCore;
 
 
 class MongoDb {
-    
+
+    /**
+     * Delai maximal de selection d'un serveur, en millisecondes.
+     *
+     * Le driver applique 30 000 ms par defaut : en cas de panne MongoDB, chaque
+     * requete applicative se figerait une demi-minute avant d'echouer. 2 000 ms
+     * suffisent pour un serveur local ou du meme datacenter et bornent l'impact
+     * d'un incident sur le temps de reponse du site.
+     */
+    const SERVER_SELECTION_TIMEOUT_MS = 2000;
+
+    /** Delai maximal d'etablissement de la connexion TCP, en millisecondes. */
+    const CONNECT_TIMEOUT_MS = 2000;
+
     private $connection;
     private $database;
     private $collection;
@@ -37,12 +50,38 @@ class MongoDb {
     // -------------------------------------------------------------------------
 
     /**
+     * Indique si la couche NoSQL est utilisable dans ce processus PHP.
+     *
+     * Le paquet Composer `mongodb/mongodb` n'est que la couche PHP : tout le
+     * travail reel repose sur l'extension native `mongodb` (php_mongodb.dll /
+     * mongodb.so). Sans elle, `new \MongoDB\Client()` leve un `Error`
+     * (« Class "MongoDB\Driver\Manager" not found ») et non une `Exception`.
+     *
+     * A appeler avant toute instanciation dans un code qui doit rester
+     * fonctionnel sans MongoDB (journalisation annexe, brouillons, etc.).
+     *
+     * @return bool
+     */
+    public static function isAvailable(): bool {
+        return extension_loaded('mongodb') && class_exists('\MongoDB\Client');
+    }
+
+    /**
      * Connexion à MongoDB
      *
      * @return bool
-     * @throws Exception
+     * @throws \Exception
      */
     public function connect(): bool {
+
+        // Garde explicite : sans l'extension native, l'instanciation du client
+        // leverait un `Error`, que les appelants (qui attrapent `Exception`)
+        // ne rattrapent pas -- `Error` n'herite pas d'`Exception`. La requete
+        // finissait alors en 500. On echoue ici, tot et avec un type attendu.
+        if (!static::isAvailable()) {
+            throw new \Exception("Extension PHP 'mongodb' non chargee : couche NoSQL indisponible.");
+        }
+
         try {
             $uri = $this->buildUri();
 
@@ -51,7 +90,10 @@ class MongoDb {
 
             return true;
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
+            // `Throwable` et non `Exception` : un defaut de chargement de
+            // classe ou un TypeError du driver doit lui aussi ressortir sous
+            // forme d'Exception pour rester rattrapable par l'appelant.
             throw new \Exception("Erreur de connexion MongoDB : " . $e->getMessage());
         }
     }
@@ -109,7 +151,7 @@ class MongoDb {
 
             return $results;
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             throw new \Exception("Erreur SELECT : " . $e->getMessage());
         }
     }
@@ -130,7 +172,7 @@ class MongoDb {
 
             return $document ? $this->documentToArray($document) : null;
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             throw new \Exception("Erreur SELECT ONE : " . $e->getMessage());
         }
     }
@@ -148,7 +190,7 @@ class MongoDb {
         try {
             return $this->collection->countDocuments($filter);
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             throw new \Exception("Erreur COUNT : " . $e->getMessage());
         }
     }
@@ -175,7 +217,7 @@ class MongoDb {
 
             return (string) $result->getInsertedId();
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             throw new \Exception("Erreur INSERT : " . $e->getMessage());
         }
     }
@@ -207,7 +249,7 @@ class MongoDb {
 
             return $ids;
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             throw new \Exception("Erreur INSERT MANY : " . $e->getMessage());
         }
     }
@@ -236,7 +278,7 @@ class MongoDb {
 
             return $result->getModifiedCount();
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             throw new \Exception("Erreur UPDATE : " . $e->getMessage());
         }
     }
@@ -261,7 +303,7 @@ class MongoDb {
 
             return $result->getModifiedCount();
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             throw new \Exception("Erreur UPDATE MANY : " . $e->getMessage());
         }
     }
@@ -290,7 +332,7 @@ class MongoDb {
 
             return $result->getModifiedCount();
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             throw new \Exception("Erreur UPSERT : " . $e->getMessage());
         }
     }
@@ -314,7 +356,7 @@ class MongoDb {
 
             return $result->getDeletedCount();
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             throw new \Exception("Erreur DELETE : " . $e->getMessage());
         }
     }
@@ -334,7 +376,7 @@ class MongoDb {
 
             return $result->getDeletedCount();
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             throw new \Exception("Erreur DELETE MANY : " . $e->getMessage());
         }
     }
@@ -359,18 +401,29 @@ class MongoDb {
      * @return string
      */
     private function buildUri(): string {
+
+        // Les deux delais sont portes par l'URI plutot que par les options du
+        // client : ils s'appliquent ainsi a toutes les operations, y compris
+        // celles declenchees paresseusement au premier acces a la collection.
+        $timeouts = sprintf(
+            'serverSelectionTimeoutMS=%d&connectTimeoutMS=%d',
+            static::SERVER_SELECTION_TIMEOUT_MS,
+            static::CONNECT_TIMEOUT_MS
+        );
+
         if (!empty($this->username) && !empty($this->password)) {
             return sprintf(
-                'mongodb://%s:%s@%s:%d/%s',
-                $this->username,
-                $this->password,
+                'mongodb://%s:%s@%s:%d/%s?%s',
+                rawurlencode($this->username),
+                rawurlencode($this->password),
                 $this->host,
                 $this->port,
-                $this->dbName
+                $this->dbName,
+                $timeouts
             );
         }
 
-        return sprintf('mongodb://%s:%d', $this->host, $this->port);
+        return sprintf('mongodb://%s:%d/?%s', $this->host, $this->port, $timeouts);
     }
 
     /**
@@ -405,7 +458,7 @@ class MongoDb {
     public function toObjectId(string $id): \MongoDB\BSON\ObjectId {
         try {
             return new \MongoDB\BSON\ObjectId($id);
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             throw new \Exception("ID invalide : " . $e->getMessage());
         }
     }

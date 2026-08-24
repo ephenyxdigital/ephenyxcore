@@ -683,7 +683,9 @@ class Translate {
                 }
             }
 
-        } else if (!is_string($ret) || $ret === '') { 
+        }
+		
+		if (!is_string($ret) || is_null($ret)  || $ret === '') { 
 			$ret = $string;
         }
 

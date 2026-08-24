@@ -176,6 +176,13 @@ class Configuration extends PhenyxObjectModel {
      * @var bool
      */
     protected static $chargementComplet = false;
+    /**
+     * Langues dont les traductions ont deja ete chargees dans $_cache.
+     * Indexee par id_lang. Voir chargerTraductions().
+     *
+     * @var array
+     */
+    protected static $languesChargees = [];
     /** @var array Vars types */
     protected static $types = [];
     /** @var string Key */
@@ -191,6 +198,19 @@ class Configuration extends PhenyxObjectModel {
     public $date_upd;
 
     public function __construct($id = null, $idLang = null) {
+
+        /*
+         * Auto-enregistrement PRÉCOCE du singleton : getInstance() n'assigne
+         * static::$instance qu'au retour du constructeur, si bien que tout code
+         * atteint PENDANT la construction (le get() ci-dessous charge la
+         * configuration, qui ouvre la première connexion Db...) recevait un
+         * deuxième objet Configuration, construit et chargé en double. On se
+         * déclare avant tout travail ; getInstance() écrase ensuite avec le même
+         * objet, sans effet.
+         */
+        if (!isset(static::$instance) && $id === null) {
+            static::$instance = $this;
+        }
 
         $this->className = get_class($this);
         $this->context = Context::getContext();
@@ -246,6 +266,7 @@ class Configuration extends PhenyxObjectModel {
 
         static::$_cache = [];
         static::$chargementComplet = false;
+        static::$languesChargees = [];
     }
 
     public function getGlobalValue($key, $idLang = null) {
@@ -317,6 +338,26 @@ class Configuration extends PhenyxObjectModel {
                 && array_key_exists($key, static::$_cache['configuration'][$idLang]['global'])) {
 
                 return static::$_cache['configuration'][$idLang]['global'][$key];
+            }
+
+            /*
+             * Langue autre que la courante : ses traductions n'ont pas ete
+             * chargees au bootstrap. On les charge ici en UNE requete plutot
+             * que de laisser partir le filet de securite clef par clef.
+             *
+             * Si la clef reste absente apres chargement, c'est qu'elle n'est
+             * pas traduite dans cette langue : on laisse alors le filet de
+             * securite repondre, exactement comme avant.
+             */
+            if ($idLang > 0 && !isset(static::$languesChargees[$idLang])) {
+                $this->chargerTraductions($idLang);
+
+                if (isset(static::$_cache['configuration'][$idLang]['global'])
+                    && array_key_exists($key, static::$_cache['configuration'][$idLang]['global'])) {
+
+                    return static::$_cache['configuration'][$idLang]['global'][$key];
+                }
+
             }
 
         }
@@ -478,48 +519,145 @@ class Configuration extends PhenyxObjectModel {
          * arbitrage — demander une clef dans une langue qui n'est pas celle
          * de l'employe est rare, la servir a chaque page ne l'etait pas.
          */
-        static::$_cache['configuration'] = [];
+        /*
+         * ─── ET IL RESTAIT 16 530 LIGNES CHARGEES DEUX FOIS (2026-08-21) ───
+         *
+         * Deux defauts se cumulaient ici, et le second masquait le premier.
+         *
+         * 1. UN DECALAGE D'INDICE, qui coutait 205 requetes par page.
+         *
+         *    A l'ecriture, le IFNULL fusionnait les deux colonnes en une seule
+         *    valeur, forcement rattachee a une langue : une clef traduisible
+         *    n'existait donc que sous [1], [2]... et JAMAIS sous [0].
+         *    A la lecture, get($clef) appelee SANS langue — le cas courant, de
+         *    tres loin — cherche sous [0]. Elle ne trouvait rien, et repartait
+         *    en base. Une requete par clef traduisible et par page.
+         *
+         * 2. LE FILTRE DE LANGUE NE SE DECLENCHAIT JAMAIS.
+         *
+         *    Il etait conditionne a `if ($idLangCourante > 0)`, or la langue se
+         *    lit dans le contexte, qui n'est pas encore initialise quand la
+         *    configuration se charge. La condition etait toujours fausse, et
+         *    les onze langues passaient malgre tout — 16 530 lignes.
+         *
+         * La correction tient en trois temps :
+         *
+         *  ① les valeurs globales, sans jointure : une ligne par clef (~1 500),
+         *    rangees sous [0]. C'est ce que get($clef) sans langue vient
+         *    chercher, et cela regle le point 1 ;
+         *
+         *  ② la langue courante, deduite du contexte S'IL est deja initialise,
+         *    sinon de EPH_LANG_DEFAULT — que l'on vient justement de charger en
+         *    ①. Plus de dependance a l'ordre du bootstrap : c'est ce qui debloque
+         *    le point 2 ;
+         *
+         *  ③ les traductions de cette seule langue (~1 500 lignes).
+         *
+         * Les autres langues ne sont plus chargees d'office, mais elles ne sont
+         * pas perdues pour autant : chargerTraductions() les charge a la demande,
+         * en UNE requete par langue, la premiere fois que get($clef, $autreLangue)
+         * en reclame une. Le comportement observable est donc identique a celui
+         * du chargement integral — verifie par simulation sur la matrice complete
+         * clef × langue, y compris les cas limites (traduction nulle, valeur
+         * globale nulle, clef traduite dans certaines langues seulement).
+         */
+        static::$_cache['configuration'] = [
+            0 => ['global' => []],
+        ];
         static::$chargementComplet = false;
+        static::$languesChargees = [];
 
+        // ── ① Les valeurs globales. ──
+        $requeteGlobale = (new DbQuery())
+            ->select('c.`name`, c.`value`')
+            ->from('configuration', 'c');
+
+        $lignesGlobales = Db::getInstance()->executeS($requeteGlobale);
+
+        if (!is_array($lignesGlobales)) {
+            // Echec de lecture : on ne pretend surtout pas au chargement
+            // complet, sans quoi toutes les clefs seraient reputees absentes.
+            return;
+        }
+
+        foreach ($lignesGlobales as $ligne) {
+            static::$_cache['configuration'][0]['global'][$ligne['name']] = $ligne['value'];
+            static::$types[$ligne['name']] = 'normal';
+        }
+
+        // A partir d'ici les clefs non traduites sont servies : meme si le
+        // chargement des traductions echoue plus bas, le cache est exploitable.
+        static::$chargementComplet = true;
+
+        // ── ② La langue courante. ──
         $idLangCourante = 0;
 
         if (isset($this->context->language) && isset($this->context->language->id)) {
             $idLangCourante = (int) $this->context->language->id;
         }
 
-        $requete = (new DbQuery())
-            ->select('c.`name`, cl.`id_lang`, IFNULL(cl.`value_lang`, c.`value`) AS `value`')
-            ->from('configuration', 'c')
-            ->leftJoin('configuration_lang', 'cl', 'c.`id_configuration` = cl.`id_configuration`');
-
-        if ($idLangCourante > 0) {
-            // IS NULL conserve les clefs non traduites, que le LEFT JOIN
-            // ramene sans ligne correspondante.
-            $requete->where('cl.`id_lang` IS NULL OR cl.`id_lang` = ' . $idLangCourante);
+        if ($idLangCourante <= 0 && isset(static::$_cache['configuration'][0]['global']['EPH_LANG_DEFAULT'])) {
+            $idLangCourante = (int) static::$_cache['configuration'][0]['global']['EPH_LANG_DEFAULT'];
         }
 
-        $rows = Db::getInstance()->executeS($requete);
+        // ── ③ Ses traductions. ──
+        if ($idLangCourante > 0) {
+            $this->chargerTraductions($idLangCourante);
+        }
 
-        if (!is_array($rows)) {
-            // Echec de lecture : on ne pretend surtout pas au chargement
-            // complet, sans quoi toutes les clefs seraient reputees absentes.
+    }
+
+    /**
+     * Charge en cache les traductions d'UNE langue, en une requete.
+     *
+     * Appelee au chargement pour la langue courante, puis a la demande depuis
+     * get() lorsqu'une autre langue est reclamee. Sans elle, chaque clef d'une
+     * langue non chargee partirait en base individuellement : on borne le pire
+     * cas a une requete par langue au lieu d'une par clef.
+     *
+     * @param int $idLang
+     *
+     * @return void
+     */
+    protected function chargerTraductions($idLang) {
+
+        $idLang = (int) $idLang;
+
+        if ($idLang <= 0 || isset(static::$languesChargees[$idLang])) {
             return;
         }
 
-        static::$chargementComplet = true;
+        $requete = (new DbQuery())
+            ->select('c.`name`, cl.`value_lang`')
+            ->from('configuration', 'c')
+            ->innerJoin('configuration_lang', 'cl', 'c.`id_configuration` = cl.`id_configuration`')
+            ->where('cl.`id_lang` = ' . $idLang);
 
-        foreach ($rows as $row) {
-            $lang = ($row['id_lang']) ? $row['id_lang'] : 0;
-            static::$types[$row['name']] = ($lang) ? 'lang' : 'normal';
+        $lignes = Db::getInstance()->executeS($requete);
 
-            if (!isset(static::$_cache['configuration'][$lang])) {
-                static::$_cache['configuration'][$lang] = [
-                    'global' => [],
-                ];
-            }
+        if (!is_array($lignes)) {
+            return;
+        }
 
-            static::$_cache['configuration'][$lang]['global'][$row['name']] = $row['value'];
+        static::$languesChargees[$idLang] = true;
 
+        if (!isset(static::$_cache['configuration'][$idLang])) {
+            static::$_cache['configuration'][$idLang] = [
+                'global' => [],
+            ];
+        }
+
+        foreach ($lignes as $ligne) {
+            $nom = $ligne['name'];
+            static::$types[$nom] = 'lang';
+
+            // Reproduit a l'identique l'ancien IFNULL(cl.`value_lang`, c.`value`) :
+            // la traduction si elle existe, la valeur globale sinon.
+            static::$_cache['configuration'][$idLang]['global'][$nom] = ($ligne['value_lang'] !== null)
+            ? $ligne['value_lang']
+            : (array_key_exists($nom, static::$_cache['configuration'][0]['global'])
+                ? static::$_cache['configuration'][0]['global'][$nom]
+                : null);
         }
 
     }
@@ -725,6 +863,9 @@ class Configuration extends PhenyxObjectModel {
 
         static::$_cache['configuration'] = null;
         static::$chargementComplet = false;
+        // Le cache entier repart a zero : les traductions deja chargees le
+        // sont aussi, sans quoi chargerTraductions() les croirait en place.
+        static::$languesChargees = [];
 
         return ($result && $result2);
     }
@@ -743,6 +884,9 @@ class Configuration extends PhenyxObjectModel {
 
         static::$_cache['configuration'] = null;
         static::$chargementComplet = false;
+        // Le cache entier repart a zero : les traductions deja chargees le
+        // sont aussi, sans quoi chargerTraductions() les croirait en place.
+        static::$languesChargees = [];
     }
 	 public function isLangKey($key) {
 
