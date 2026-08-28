@@ -30,7 +30,6 @@ class TopMenuColumnWrap extends PhenyxObjectModel {
     public static $definition = [
         'table'     => 'topmenu_columns_wrap',
         'primary'   => 'id_topmenu_columns_wrap',
-        'multishop' => false,
         'multilang' => true,
         'fields'    => [
             'id_topmenu'             => ['type' => self::TYPE_INT, 'required' => true],
@@ -157,8 +156,7 @@ class TopMenuColumnWrap extends PhenyxObjectModel {
         $result = parent::add($autodate, $nullValues);
 
         if ($result) {
-            $this->_session->remove('getAdminMenus');
-            $this->_session->remove('getFrontMenus');
+            TopMenu::flushMenuCache();
         }
 
         return $result;
@@ -169,8 +167,7 @@ class TopMenuColumnWrap extends PhenyxObjectModel {
         $result = parent::update($nullValues);
 
         if ($result) {
-            $this->_session->remove('getAdminMenus');
-            $this->_session->remove('getFrontMenus');
+            TopMenu::flushMenuCache();
         }
 
         return $result;
@@ -185,8 +182,7 @@ class TopMenuColumnWrap extends PhenyxObjectModel {
             $column->delete();
         }
 
-        $this->_session->remove('getAdminMenus');
-        $this->_session->remove('getFrontMenus');
+        TopMenu::flushMenuCache();
 
         return parent::delete();
     }

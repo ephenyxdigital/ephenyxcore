@@ -54,11 +54,45 @@ class HelperCategoriesTree extends Helper {
 	public function generateCategoryGridScript($category_tree, $identifier) {
 
 		$paragrid = new ParamGrid('TreeCategory', 'AdminProductAssociatedCategories', 'category_product', $this->identifier);
-		$paragrid->height = 500;
+		/* ⚠️ LA HAUTEUR PASSE PAR `heightModel`, PAS PAR `height`.
+		 *
+		 * `ParamGrid::$height` est declaree ligne 45 et n est lue NULLE PART.
+		 * L option reellement transmise a pqGrid vient de `heightModel` :
+		 *
+		 *     'height' => (!empty($this->heightModel)) ? $this->heightModel : '\'flex\''
+		 *
+		 * Ecrire 500 ou 'flex' dans `height` revenait donc au meme : pqGrid
+		 * recevait 'flex'. Or en 'flex' il s etale a la hauteur de son contenu et
+		 * delegue le defilement A LA FENETRE : il ne rend que les lignes comprises
+		 * dans le viewport du NAVIGATEUR et attend un `scroll` de la page pour
+		 * rendre la suite. Dans un panneau flottant et decoupe, ce scroll n arrive
+		 * jamais. Mesure du 26/08 : 16 lignes rendues sur 54, un tableau de
+		 * 1885 px pour 530 px de lignes reelles, et du vide en dessous.
+		 *
+		 * Une hauteur NUMERIQUE fait construire a pqGrid son propre viewport et sa
+		 * propre barre de defilement : la virtualisation se cale alors sur SON
+		 * defilement a lui, et les lignes suivantes arrivent au fil du parcours. */
+
+		$paragrid->heightModel = 500;
 		$paragrid->showNumberCell = 0;
 		$paragrid->showTitle = 1;
-		$paragrid->title = '\'' . $this->la('Filter by Category') . '\'';
+		$paragrid->title = '\'' . $this->l('Filter by Category') . '\'';
 		$paragrid->selectionModelType = 'null';
+
+		/* ⚠️ PAS DE PAGINATION SUR UN ARBRE.
+		 *
+		 * ParamGrid pagine par defaut a 100 lignes. Sur l arbre des categories,
+		 * cela affichait « Page 1 sur 2 » : la moitie des collections se
+		 * retrouvait sur une seconde page, donc HORS DE PORTEE d un utilisateur
+		 * venu filtrer. Un arbre coupe en deux n est pas un arbre.
+		 *
+		 * Un tableau vide fait sauter le `!empty()` de generateParaGridOption() :
+		 * aucun `pageModel` n est emis, pqGrid tient l arbre entier dans une
+		 * seule vue et n affiche aucune barre de pagination. C est sa propre
+		 * barre de defilement, rendue possible par `heightModel` ci-dessus,
+		 * qui permet de parcourir l ensemble. */
+
+		$paragrid->pageModel = [];
 		//$paragrid->needRequestModel = false;
         $paragrid->dataModel  = [
 			'data' => $category_tree
@@ -86,7 +120,7 @@ class HelperCategoriesTree extends Helper {
 				[
 					'type'     => '\'button\'',
 					'icon'     => '\'ui-icon-disk\'',
-					'label'    => '\'' . $this->la('Coollapse all') . '\'',
+					'label'    => '\'' . $this->l('Collapse all') . '\'',
 					'listener' => 'function () {' . PHP_EOL . '
                        this.Tree().collapseAll();' . PHP_EOL . '
                     }' . PHP_EOL,
@@ -95,7 +129,7 @@ class HelperCategoriesTree extends Helper {
 				[
 					'type'     => '\'button\'',
 					'icon'     => '\'ui-icon-disk\'',
-					'label'    => '\'' . $this->la('Expand all') . '\'',
+					'label'    => '\'' . $this->l('Expand all') . '\'',
 					'listener' => 'function () {' . PHP_EOL . '
                        this.Tree().expandAll();' . PHP_EOL . '
                     }' . PHP_EOL,

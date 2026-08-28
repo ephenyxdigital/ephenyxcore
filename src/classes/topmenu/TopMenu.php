@@ -17,6 +17,7 @@ class TopMenu extends PhenyxObjectModel {
     protected static $_compileCheck;
 
     public $id;
+    public $id_company;
     public $id_cms;
     public $id_pfg;
     public $id_specific_page;
@@ -68,7 +69,11 @@ class TopMenu extends PhenyxObjectModel {
         'table'     => 'topmenu',
         'primary'   => 'id_topmenu',
         'multilang' => true,
+		'have_meta' => true,
         'fields'    => [
+            // `id_company` a NULL = onglet commun a toutes les vitrines.
+            // Surtout pas 'required' : la validation rejetterait ces onglets-la.
+            'id_company'                            => ['type' => self::TYPE_INT, 'validate' => 'isNullOrUnsignedId', 'allow_null' => true],
             'type'                                  => ['type' => self::TYPE_INT],
             'id_cms'                                => ['type' => self::TYPE_INT],
             'id_pfg'                                => ['type' => self::TYPE_INT],
@@ -436,6 +441,8 @@ class TopMenu extends PhenyxObjectModel {
         return $return;
     }
 
+
+
     public function getFrontOutputValue() {
 
         $is_ajax = $this->context->phenyxConfig->get('EPH_FRONT_AJAX') ? 1 : 0;
@@ -799,7 +806,7 @@ class TopMenu extends PhenyxObjectModel {
     public function getColumnsWrap() {
 
         if ($this->context->cache_enable && is_object($this->context->cache_api)) {
-            $value = $this->context->cache_api->getData('getColumnsWrap_' . $this->id, 864000);
+            $value = $this->context->cache_api->getData(self::columnsWrapCacheKey($this->id, $this->context->language->id, $this->request_admin, 'i'), 864000);
             $temp = empty($value) ? null : Tools::jsonDecode($value);
 
             if (!empty($temp)) {
@@ -825,7 +832,7 @@ class TopMenu extends PhenyxObjectModel {
 
         if ($this->context->cache_enable && is_object($this->context->cache_api)) {
             $temp = $columnWrap === null ? null : Tools::jsonEncode($columnWrap);
-            $this->context->cache_api->putData('getColumnsWrap_' . $this->id, $temp);
+            $this->context->cache_api->putData(self::columnsWrapCacheKey($this->id, $this->context->language->id, $this->request_admin, 'i'), $temp);
         }
 
         return $columnWrap;
@@ -1429,7 +1436,7 @@ class TopMenu extends PhenyxObjectModel {
         $context = Context::getContext();
 
         if ($context->cache_enable && is_object($context->cache_api)) {
-            $value = $context->cache_api->getData('getColumnsWrap_' . $objectData['id'], 864000);
+            $value = $context->cache_api->getData(self::columnsWrapCacheKey($objectData['id'], $context->language->id, PhenyxObjectModel::$admin_request, 's'), 864000);
             $temp = empty($value) ? null : Tools::jsonDecode($value);
 
             if (!empty($temp)) {
@@ -1455,10 +1462,122 @@ class TopMenu extends PhenyxObjectModel {
 
         if ($context->cache_enable && is_object($context->cache_api)) {
             $temp = $columnWrap === null ? null : Tools::jsonEncode($columnWrap);
-            $context->cache_api->putData('getColumnsWrap_' . $objectData['id'], $temp);
+            $context->cache_api->putData(self::columnsWrapCacheKey($objectData['id'], $context->language->id, PhenyxObjectModel::$admin_request, 's'), $temp);
         }
 
         return $columnWrap;
+    }
+
+    /**
+     * Jeton de revision du menu.
+     *
+     * Il entre dans TOUTES les clefs de cache et de session du menu. Le faire
+     * tourner rend donc inatteignables d'un coup les entrees de tout le monde,
+     * y compris celles des visiteurs — ce que `session_destroy()`, qui ne
+     * touchait que la session de l'employe en train d'editer, ne pouvait pas
+     * faire. Un menu modifie en back-office restait sinon perime en front
+     * jusqu'a expiration naturelle des sessions.
+     *
+     * La lecture est gratuite : `Configuration::get()` sert depuis son cache
+     * statique, rempli en une requete par requete HTTP.
+     */
+    public static function getRevision() {
+
+        $context = Context::getContext();
+
+        if (!isset($context->phenyxConfig) || !is_object($context->phenyxConfig)) {
+            return 1;
+        }
+
+        $revision = (int) $context->phenyxConfig->get('EPHTM_MENU_REVISION');
+
+        return $revision > 0 ? $revision : 1;
+    }
+
+    public static function bumpRevision() {
+
+        $context = Context::getContext();
+
+        if (!isset($context->phenyxConfig) || !is_object($context->phenyxConfig)) {
+            return false;
+        }
+
+        // `time()` seul ne suffit pas : deux enregistrements dans la meme
+        // seconde rendraient la meme revision, donc aucune invalidation.
+        $next = max((int) time(), self::getRevision() + 1);
+
+        return $context->phenyxConfig->updateValue('EPHTM_MENU_REVISION', $next);
+    }
+
+    /**
+     * @param int    $idTopMenu
+     * @param int    $idLang
+     * @param bool   $admin   requete back-office (le filtre `active` est saute)
+     * @param string $shape   'i' pour la version d'instance, 's' pour la statique
+     *
+     * La clef d'origine etait `getColumnsWrap_<id>` — ni la langue, ni le mode,
+     * ni la forme de la valeur. Trois consequences, toutes constatees :
+     * le premier visiteur figeait la langue des sous-menus pour dix jours ;
+     * ouvrir AdminTopMenu ecrivait dans la meme clef SANS le filtre
+     * `active = 1` et publiait donc en front des colonnes desactivees ; et les
+     * deux methodes ci-dessous n'y rangent pas la meme chose (des objets
+     * TopMenuColumnWrap d'un cote, la sortie de buildObject de l'autre).
+     */
+    protected static function columnsWrapCacheKey($idTopMenu, $idLang, $admin, $shape) {
+
+        return 'getColumnsWrap_' . self::getRevision()
+        . '_' . (int) $idTopMenu
+        . '_' . (int) $idLang
+        . '_' . ($admin ? 'a' : 'f')
+        . '_' . $shape;
+    }
+
+    /**
+     * Invalidation complete du menu. Appelee par toute ecriture sur les quatre
+     * niveaux (menu, panneau, colonne, element).
+     */
+    public static function flushMenuCache() {
+
+        $context = Context::getContext();
+
+        // Purger la revision courante AVANT de la faire tourner : sans cela les
+        // entrees restent sur le support de cache jusqu'a expiration (10 jours).
+        if (isset($context->cache_enable) && $context->cache_enable && is_object($context->cache_api)) {
+
+            $languages = Language::getLanguages(false);
+            $menus = self::getMenusId();
+
+            if (is_array($menus) && is_array($languages)) {
+
+                foreach ($menus as $menu) {
+
+                    foreach ($languages as $language) {
+
+                        foreach ([true, false] as $admin) {
+
+                            foreach (['i', 's'] as $shape) {
+                                $context->cache_api->putData(
+                                    self::columnsWrapCacheKey($menu['id_topmenu'], $language['id_lang'], $admin, $shape),
+                                    null
+                                );
+                            }
+
+                        }
+
+                    }
+
+                }
+
+            }
+
+        }
+
+        if (isset($context->_session) && is_object($context->_session)) {
+            $context->_session->removeStartingKey('getFrontMenus');
+            $context->_session->removeStartingKey('getAdminMenus');
+        }
+
+        return self::bumpRevision();
     }
 
     public static function getInstance($id = null, $idLang = null) {
@@ -1472,23 +1591,33 @@ class TopMenu extends PhenyxObjectModel {
 
     public function add($autodate = true, $nullValues = false) {
 
-        $this->position = Topmenu::getHigherPosition() + 1;
+        $this->position = TopMenu::getHigherPosition($this->id_company) + 1;
         $result = parent::add($autodate, $nullValues);
 
         if ($result) {
-            $this->context->_session->destroy();
+            self::flushMenuCache();
         }
 
         return $result;
     }
 
-    public static function getHigherPosition() {
+    /**
+     * @param int|null $idCompany null = toutes societes confondues.
+     *
+     * La position s'apprecie sur le meme ensemble que celui affiche en front :
+     * les onglets de la societe ET les onglets communs (`id_company IS NULL`).
+     */
+    public static function getHigherPosition($idCompany = null) {
 
-        $position = DB::getInstance(_EPH_USE_SQL_SLAVE_)->getValue(
-            (new DbQuery())
-                ->select('MAX(`position`)')
-                ->from('topmenu')
-        );
+        $query = (new DbQuery())
+            ->select('MAX(`position`)')
+            ->from('topmenu');
+
+        if (!is_null($idCompany)) {
+            $query->where('(`id_company` = ' . (int) $idCompany . ' OR `id_company` IS NULL)');
+        }
+
+        $position = DB::getInstance(_EPH_USE_SQL_SLAVE_)->getValue($query);
 
         return (is_numeric($position)) ? $position : -1;
     }
@@ -1498,7 +1627,7 @@ class TopMenu extends PhenyxObjectModel {
         $result = parent::update($nullValues);
 
         if ($result) {
-            $this->context->_session->destroy();
+            self::flushMenuCache();
             $this->backName = $this->getBackOutputNameValue();
             $this->link_output_value = $this->getFrontOutputValue();
             $this->columnsWrap = $this->getColumnsWrap();
@@ -1517,7 +1646,7 @@ class TopMenu extends PhenyxObjectModel {
             $wrap->delete();
         }
 
-        $this->context->_session->destroy();
+        self::flushMenuCache();
         return parent::delete();
     }
 
@@ -1560,9 +1689,22 @@ class TopMenu extends PhenyxObjectModel {
         ], 'id_topmenu = ' . (int) $idMenu);
     }
 
-    public function getMenus($id_lang, $active = true, $groupRestrict = false) {
+    /**
+     * @param int      $id_lang
+     * @param int|null $id_company null = aucun filtre, tous les onglets.
+     *                             Un entier = les onglets de cette societe PLUS
+     *                             les onglets communs (`id_company IS NULL`).
+     * @param bool     $active
+     * @param bool     $groupRestrict
+     */
+    public function getMenus($id_lang, $id_company = null, $active = true, $groupRestrict = false) {
 
-        $topMenus = $this->_session->get('getFrontMenus');
+        $key = 'getFrontMenus_' . self::getRevision()
+        . '_' . (is_null($id_company) ? 'all' : (int) $id_company)
+        . '_' . (int) $id_lang
+        . '_' . ($active ? 1 : 0);
+
+        $topMenus = $this->_session->get($key);
 
         if (empty($topMenus)) {
             $topMenus = [];
@@ -1574,6 +1716,10 @@ class TopMenu extends PhenyxObjectModel {
                 $query->where('active = 1');
             }
 
+            if (!is_null($id_company)) {
+                $query->where('(`id_company` = ' . (int) $id_company . ' OR `id_company` IS NULL)');
+            }
+
             $query->orderBy('position');
             $menus = Db::getInstance()->executeS($query);
 
@@ -1581,27 +1727,37 @@ class TopMenu extends PhenyxObjectModel {
                 $topMenus[] = TopMenu::buildObject($menu['id_topmenu'], $id_lang);
             }
 
-            $this->_session->set('getFrontMenus', $topMenus);
+            $this->_session->set($key, $topMenus);
         }
 
         return $topMenus;
 
     }
 
-    public function getAdminMenus() {
+    /**
+     * @param int|null $idCompany null = toutes societes confondues.
+     */
+    public function getAdminMenus($idCompany = null) {
 
-        $topMenus = $this->_session->get('getAdminMenus');
+        $key = 'getAdminMenus_' . self::getRevision()
+        . '_' . (is_null($idCompany) ? 'all' : (int) $idCompany);
+
+        $topMenus = $this->_session->get($key);
 
         if (empty($topMenus)) {
             $this->request_admin = true;
             PhenyxObjectModel::$admin_request = true;
             $topMenus = [];
-            $menus = Db::getInstance()->executeS(
-                (new DbQuery())
-                    ->select('`id_topmenu`')
-                    ->from('topmenu')
-                    ->orderBy('position')
-            );
+            $query = (new DbQuery())
+                ->select('`id_topmenu`')
+                ->from('topmenu');
+
+            if (!is_null($idCompany)) {
+                $query->where('(`id_company` = ' . (int) $idCompany . ' OR `id_company` IS NULL)');
+            }
+
+            $query->orderBy('position');
+            $menus = Db::getInstance()->executeS($query);
 
             foreach ($menus as $menu) {
                 $topMenus[] = TopMenu::buildObject($menu['id_topmenu'], $this->context->language->id);
@@ -1610,7 +1766,7 @@ class TopMenu extends PhenyxObjectModel {
             $this->request_admin = false;
             PhenyxObjectModel::$admin_request = false;
 
-            $this->_session->set('getAdminMenus', $topMenus);
+            $this->_session->set($key, $topMenus);
         }
 
         return $topMenus;
@@ -1637,6 +1793,7 @@ class TopMenu extends PhenyxObjectModel {
 
     public function clearMenuCache() {
 
+        self::flushMenuCache();
         $this->context->smarty->clearCompiledTemplate(_THEMES_DIR_ . 'menu/ephtopmenu.tpl');
         return $this->context->smarty->clearCache(null, 'ADTM');
     }
@@ -1646,7 +1803,55 @@ class TopMenu extends PhenyxObjectModel {
         return '';
     }
 
+    /**
+     * Les types qu un plugin ajoute au menu.
+     *
+     * Un type est un couple (numero, libelle). Le coeur en connait dix ;
+     * ph_ecommerce en ajoute pour ses cibles commerciales, ph_wiki pour la
+     * page de wiki. Sans ce hook, chacun devrait surcharger le controleur en
+     * entier pour un simple libelle — c est exactement l override dont on
+     * cherche a se passer.
+     *
+     * Les numeros 1 a 7 et 9 a 13 sont pris ; 8 sert de sentinelle
+     * (`TopMenuColumn` filtre `type != 8`). Un plugin commence donc a 14.
+     */
+    public static function getExtraTypes() {
+
+        static $types = null;
+
+        if ($types !== null) {
+            return $types;
+        }
+
+        $types = [];
+        $retours = Context::getContext()->_hook->exec('actionTopMenuExtraTypes', [], null, true, false);
+
+        if (is_array($retours)) {
+
+            foreach ($retours as $plugin => $liste) {
+
+                if (is_array($liste)) {
+
+                    foreach ($liste as $numero => $libelle) {
+                        $types[(int) $numero] = $libelle;
+                    }
+
+                }
+
+            }
+
+        }
+
+        return $types;
+    }
+
     public function getType($type) {
+
+        $extra = static::getExtraTypes();
+
+        if (isset($extra[(int) $type])) {
+            return $extra[(int) $type];
+        }
 
         if ($type == 1) {
             return $this->l('CMS');
@@ -1693,7 +1898,7 @@ class TopMenu extends PhenyxObjectModel {
     public static function displayMenuForm() {
 
         $this->context = Context::getContext();
-        $menus = TopMenu::getInstance()->getMenus($this->context->cookie->id_lang, false);
+        $menus = TopMenu::getInstance()->getMenus($this->context->cookie->id_lang, null, false);
 
         if (is_array($menus) && count($menus)) {
 

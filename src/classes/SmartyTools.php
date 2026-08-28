@@ -117,13 +117,55 @@ class SmartyTools {
         
     }
     
-     public static function varExport($array, $return = false) {
-        
-        if(is_array($array)) {
-            return var_export($array, $return);
+     /**
+     * Exporte une valeur sous une forme ECRIVABLE EN JAVASCRIPT.
+     *
+     * ⚠️ ELLE NE TRAITAIT QUE LES TABLEAUX, ET RENDAIT `null` POUR TOUT LE RESTE.
+     *
+     * Or son seul appelant est `content/themes/javascript.tpl`, ligne 7, et il
+     * l appelle DANS LA BRANCHE BOOLEENNE :
+     *
+     *     {if SmartyTools::isBool($def)}
+     *     var {$k} = {SmartyTools::varExport($def, true)};
+     *
+     * Un booleen entrait, `null` sortait, Smarty imprimait le vide : le bloc
+     * des definitions JavaScript recevait `var contentOnly = ;`.
+     *
+     * Et une erreur de syntaxe ne coute pas une variable, elle coute le BLOC
+     * ENTIER : toutes les definitions suivantes disparaissent. Constate le
+     * 26/08 sur le tunnel de commande - `contentOnly`, `currencyRate`,
+     * `isLogged` et `isMobile` sont tous des booleens, tous les quatre sortaient
+     * vides, et `css_dir`, `currency`, `isLogged` avec eux.
+     *
+     * `var_export()` de PHP ne convient pas seul : il rend `NULL` en capitales,
+     * qui n est pas du JavaScript. Les cas sont donc traites explicitement.
+     *
+     * @param  mixed $valeur
+     * @param  bool  $return  Rendre la chaine (true) ou l imprimer (false),
+     *                        comme var_export().
+     * @return string|null
+     */
+    public static function varExport($valeur, $return = false) {
+
+        if (is_array($valeur)) {
+            return var_export($valeur, $return);
         }
+
+        if (is_bool($valeur)) {
+            $exporte = $valeur ? 'true' : 'false';
+        } else if ($valeur === null) {
+            $exporte = 'null';
+        } else {
+            $exporte = var_export($valeur, true);
+        }
+
+        if ($return) {
+            return $exporte;
+        }
+
+        echo $exporte;
+
         return null;
-        
     }
     
     public static function isFloat($string) {
@@ -147,12 +189,43 @@ class SmartyTools {
         
     }
     
+    /**
+     * Remplacement de chaine tolerant au type recu.
+     *
+     * ⚠️ ELLE NE RENDAIT RIEN DU TOUT SI L ENTREE N ETAIT PAS UNE CHAINE.
+     *
+     * `content/themes/javascript.tpl` l appelle dans la branche FLOTTANTE :
+     *
+     *     {elseif SmartyTools::isFloat($def)}
+     *     var {$k} = {SmartyTools::strReplace(',', '.', $def)};
+     *
+     * Un flottant n est pas une chaine : la fonction sortait par le bas, sans
+     * `return`, donc `null`, et Smarty imprimait le vide. Resultat :
+     * `var currencyRate = ;` - une erreur de syntaxe qui tue tout le bloc des
+     * definitions JavaScript, et avec lui les dizaines de variables qui
+     * suivent.
+     *
+     * Meme famille que `varExport()` corrigee le 26/08 : une aide de gabarit
+     * qui ne sait traiter qu un seul type et qui rend le vide pour les autres
+     * est un piege, parce que le vide ne se voit pas - il ne devient visible
+     * que plusieurs ecrans plus loin, sous la forme d une fonctionnalite qui
+     * ne repond plus.
+     *
+     * La conversion est explicite : `null` devient la chaine vide, tout le
+     * reste est converti puis traite normalement. Les tableaux sont passes
+     * tels quels, `str_replace()` sachant les traiter.
+     */
     public static function strReplace($field, $replace, $string) {
-        
-        if(is_string($string)) {
+
+        if (is_array($string) || is_string($string)) {
             return str_replace($field, $replace, $string);
         }
-        
+
+        if ($string === null) {
+            return '';
+        }
+
+        return str_replace($field, $replace, (string) $string);
     }
     
     public static function isArray($str) {
@@ -343,18 +416,26 @@ class SmartyTools {
         
     }
     
+    /* Meme precaution que `strReplace()` : rendre `null` pour une entree qui
+       n est pas un tableau fait imprimer le vide au gabarit, sans le moindre
+       signal. Une liste vide est la reponse juste. */
     public static function implodeArray($array, $args) {
-        
-        if(is_array($array)) {
+
+        if (is_array($array)) {
             return implode($args, $array);
         }
+
+        return '';
     }
     
+    /* Un decompte qui rend `null` s imprime en vide et se compare mal.
+       Zero est la reponse juste pour ce qui n est pas un tableau. */
     public static function sizeOf($array) {
-        if(is_array($array)) {
+        if (is_array($array)) {
             return sizeof($array);
         }
-        return null;
+
+        return 0;
     }
     
     public static function sprinTf($string, $args) {

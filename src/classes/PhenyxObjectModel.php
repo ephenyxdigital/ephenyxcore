@@ -302,11 +302,43 @@ abstract class PhenyxObjectModel implements Core_Foundation_Database_EntityInter
             $this->getExtraDefs();
         }
         
+        /*
+         * ═══ LES CHAMPS AJOUTES PAR UN PLUGIN N ARRIVAIENT NULLE PART ═══
+         *
+         * Cette boucle ecrivait dans `self::$definition['fields']`. Or
+         * `PhenyxObjectModel` declare lui-meme `public static $definition = []`
+         * (ligne 149), et une propriete statique n est PAS polymorphe avec
+         * `self::` : dans le corps de cette classe, `self::$definition` designe
+         * le tableau vide de la classe de base, jamais `TopMenu::$definition`
+         * ni celui d aucune autre fille. Les champs partaient donc dans un
+         * tableau que personne ne relit.
+         *
+         * `static::` aurait vise la bonne classe, mais n aurait pas suffi :
+         * `$this->def` est fige ligne 244 par `getDefinition()`, AVANT ce bloc,
+         * et c est `$this->def['fields']` que `formatFields()` parcourt pour
+         * composer l INSERT et l UPDATE. C est donc lui qu il faut completer.
+         *
+         * Constate le 2026-08-28 : ph_ecommerce declarait `id_category`,
+         * `id_supplier` et `id_manufacturer` par `actionTopMenuExtraDefinition`
+         * et `actionTopMenuColumnExtraDefinition`, les deux hooks etaient bien
+         * enregistres, et l affectation `$topMenuColumn->id_category = …` etait
+         * silencieusement perdue a l enregistrement.
+         */
+
         if (is_array($this->extraDefs) && count($this->extraDefs)) {
             foreach ($this->extraDefs as $plugin => $defs) {
                 if (is_array($defs) && count($defs)) {
                     foreach ($defs as $key => $value) {
-                       self::$definition['fields'][$key] = $value;
+                        $this->def['fields'][$key] = $value;
+
+                        /* La propriete doit exister : sans elle, l affectation
+                           faite par le plugin creerait une propriete dynamique
+                           — depreciee depuis PHP 8.2, supprimee en PHP 9. */
+
+                        if (!property_exists($this, $key)) {
+                            $this->{$key} = null;
+                        }
+
                     }
                 }
             }
@@ -1862,14 +1894,50 @@ abstract class PhenyxObjectModel implements Core_Foundation_Database_EntityInter
         return true;
     }
 
+    /**
+     * Invalide l objet dans le cache memoire de la requete.
+     *
+     * ⚠️ CETTE METHODE N INVALIDAIT RIEN. PREFIXE CORRIGE LE 2026-08-27.
+     *
+     * `Adapter_EntityMapper::load()` range chaque objet charge sous la cle
+     *
+     *     'objectmodel_' . $classname . '_' . $id . '_' . $idLang
+     *
+     * tandis que cette methode nettoyait
+     *
+     *     'PhenyxObjectModel_' . $classname . '_' . $id . '_*'
+     *
+     * Deux prefixes differents : le motif de nettoyage ne correspondait a
+     * AUCUNE cle reellement stockee. Le seul autre usage de
+     * `PhenyxObjectModel_` dans le socle est `PhenyxObjectModel_def_<classe>`,
+     * qui est le cache des DEFINITIONS et n a rien a voir.
+     *
+     * Consequence, pour toute la plateforme : une fois qu un objet avait ete
+     * charge dans une requete, tout `new X($id)` ULTERIEUR de la meme requete
+     * rendait la ligne telle qu elle etait AU PREMIER CHARGEMENT, quoi qu on
+     * ait ecrit entre-temps. `update()` appelle pourtant clearCache() en tete
+     * — il ne se passait simplement rien.
+     *
+     * Le mode de panne est particulierement discret : ecrire puis relire dans
+     * la meme requete rend des valeurs perimees, et si l on ecrit ensuite cet
+     * objet relu, on REMET les anciennes valeurs par-dessus les nouvelles. Le
+     * symptome qui l a fait sortir : un suivi de formation dont `progress` et
+     * `total_time` restaient a 0 alors que les elements etaient bien termines
+     * et les 3420 secondes d activite bien enregistrees — le meme code, rejoue
+     * seul dans une requete neuve, ecrivait correctement.
+     *
+     * Le cache est celui de `CacheApi::$local`, un tableau statique vide a
+     * chaque requete : ce defaut n a jamais pu corrompre de donnees d une
+     * requete a l autre.
+     */
     public function clearCache($all = false) {
 
         if ($all) {
-            CacheApi::clean('PhenyxObjectModel_' . $this->def['classname'] . '_*');
+            CacheApi::clean('objectmodel_' . $this->def['classname'] . '_*');
         } else
 
         if ($this->id) {
-            CacheApi::clean('PhenyxObjectModel_' . $this->def['classname'] . '_' . (int) $this->id . '_*');
+            CacheApi::clean('objectmodel_' . $this->def['classname'] . '_' . (int) $this->id . '_*');
         }
 
     }

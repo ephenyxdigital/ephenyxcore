@@ -1374,7 +1374,7 @@ class BackTab extends PhenyxObjectModel {
 
                 (new DbQuery())
 
-                    ->select('`id_back_tab`, `class_name`')
+                    ->select('`id_back_tab`, `class_name`, `function`')
 
                     ->from('back_tab'),
 
@@ -1392,7 +1392,23 @@ class BackTab extends PhenyxObjectModel {
 
                 foreach ($result as $row) {
 
-                    static::$_getIdFromClassName[strtolower((string) $row['class_name'])] = $row['id_back_tab'];
+                    /* ⚠️ Une classe peut porter PLUSIEURS onglets, distingues par
+                       leur `function` — AdminCustomerPieces en a cinq. La carte
+                       n'en retient qu'un, et sans precaution c'est celui que la
+                       requete rend en dernier, donc au hasard.
+
+                       L'onglet designe par un simple nom de classe est l'onglet
+                       « nu », celui sans `function` : il doit gagner. Sinon
+                       installPluginTab() reecrit un onglet specialise —
+                       « Devis/Proforma » renomme en « Pieces clients » et
+                       deplace. */
+
+                    $class = strtolower((string) $row['class_name']);
+                    $bare = ($row['function'] === null || $row['function'] === '');
+
+                    if ($bare || !isset(static::$_getIdFromClassName[$class])) {
+                        static::$_getIdFromClassName[$class] = $row['id_back_tab'];
+                    }
 
                 }
 
@@ -1426,6 +1442,29 @@ class BackTab extends PhenyxObjectModel {
 
 
 
+    /**
+     * Normalise une chaine `function` avant de la comparer.
+     *
+     * Les lignes historiques de `back_tab` portent des apostrophes
+     * TYPOGRAPHIQUES (U+2018 / U+2019) la ou le code declare des apostrophes
+     * droites — sequelle d'un copier-coller depuis un traitement de texte.
+     * Sans normalisation, openAjaxController avec l'une ou l'autre donne deux
+     * md5 differents : le socle croit l'onglet absent et en cree un second.
+     *
+     * Les espaces etaient deja retires — l'intention d'une comparaison
+     * normalisee etait la, il lui manquait les guillemets.
+     */
+    protected static function normalizeTabFunction($function) {
+
+        $function = str_replace(
+            ["\xE2\x80\x98", "\xE2\x80\x99", "\xE2\x80\x9C", "\xE2\x80\x9D", '"'],
+            "'",
+            (string) $function
+        );
+
+        return strtolower(str_replace(' ', '', $function));
+    }
+
     public static function getIdFromFuncAndClassName($className, $function) {
 
 
@@ -1438,7 +1477,7 @@ class BackTab extends PhenyxObjectModel {
 
 
 
-        $key = strtolower($className) . md5(strtolower(str_replace(' ', '', $function)));
+        $key = strtolower($className) . md5(self::normalizeTabFunction($function));
 
 
 
@@ -1466,9 +1505,21 @@ class BackTab extends PhenyxObjectModel {
 
 
 
-        if (static::$_getIdFromClassName === null) {
+        /* ⚠️ CORRIGE le 28/08/2026. La garde testait et initialisait
+           `$_getIdFromClassName` — le cache de l'AUTRE methode — alors que le
+           tableau rempli plus bas, et relu au retour, est
+           `$_getIdFromFuncAndClassName`.
 
-            static::$_getIdFromClassName = [];
+           Des que getIdFromClassName() avait ete appelee une fois dans la
+           requete — ce que installTabs() fait a chaque entree pour resoudre son
+           parent — ce bloc etait saute, la carte restait vide, et la methode
+           rendait false POUR TOUT LE MONDE. installPluginTab() croyait alors
+           l'onglet absent et en creait un nouveau : treize onglets en double
+           dans le menu de ph_ecommerce le 28/08/2026. */
+
+        if (static::$_getIdFromFuncAndClassName === null) {
+
+            static::$_getIdFromFuncAndClassName = [];
 
             $result = Db::getInstance(_EPH_USE_SQL_SLAVE_)->executeS(
 
@@ -1490,7 +1541,7 @@ class BackTab extends PhenyxObjectModel {
 
                 foreach ($result as $row) {
 
-                    static::$_getIdFromFuncAndClassName[strtolower($row['class_name']) . md5(strtolower(str_replace(' ', '', $row['function'])))] = $row['id_back_tab'];
+                    static::$_getIdFromFuncAndClassName[strtolower($row['class_name']) . md5(self::normalizeTabFunction($row['function']))] = $row['id_back_tab'];
 
                 }
 
@@ -2430,6 +2481,8 @@ class BackTab extends PhenyxObjectModel {
 
         static::$_getIdFromClassName = null;
 
+        static::$_getIdFromFuncAndClassName = null;
+
 
 
         return parent::save();
@@ -2675,6 +2728,8 @@ class BackTab extends PhenyxObjectModel {
             //forces cache to be reloaded
 
             static::$_getIdFromClassName = null;
+
+        static::$_getIdFromFuncAndClassName = null;
 
             $this->context->_tools->generateTabs(false);
 

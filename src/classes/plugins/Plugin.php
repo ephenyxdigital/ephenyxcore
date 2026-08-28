@@ -490,21 +490,72 @@ abstract class Plugin {
         return $result;
     }
 
+    /**
+     * Greffe une colonne sur une table existante, si elle n y est pas deja.
+     *
+     * ⚠️ IL MANQUAIT LE TEST DE LA TABLE.
+     *
+     * Le controle portait sur la COLONNE, dans INFORMATION_SCHEMA.COLUMNS.
+     * Quand la TABLE elle-meme n existait pas, la requete ne rendait rien —
+     * exactement comme pour une colonne absente — et l ALTER partait quand
+     * meme, pour echouer :
+     *
+     *   SQLSTATE[42S02] Base table or view not found: 1146
+     *   Table '<base>.<prefixe>_xxx' doesn't exist for query: ALTER TABLE ...
+     *
+     * Le retour n etant teste par aucun appelant, l installation se terminait
+     * normalement et deposait la ligne au journal des erreurs. Vu depuis le
+     * journal, on ne peut pas distinguer « la table n existe pas encore »
+     * (ordre d appel a corriger chez l appelant) de « la table n existe pas
+     * du tout » (dependance absente) : les deux donnent le meme 1146.
+     *
+     * Desormais on teste la table, et on rend un booleen — l appelant qui veut
+     * savoir peut savoir, ceux qui ignorent le retour se comportent comme
+     * avant, sans la ligne au journal.
+     *
+     * @return bool true si la colonne est en place a la sortie.
+     */
     public function alterSqlTable($table, $column, $type, $after) {
 
-        $query = 'SELECT `COLUMN_NAME`
-            FROM `INFORMATION_SCHEMA`.`COLUMNS`
-            WHERE `TABLE_SCHEMA`="' . _DB_NAME_ . '"
-            AND `TABLE_NAME`= "' . _DB_PREFIX_ . $table . '"
-            AND `COLUMN_NAME`= "' . $column . '"';
+        $exists = Db::getInstance()->getValue(
+            'SELECT `TABLE_NAME`
+            FROM `INFORMATION_SCHEMA`.`TABLES`
+            WHERE `TABLE_SCHEMA` = "' . pSQL(_DB_NAME_) . '"
+            AND `TABLE_NAME` = "' . pSQL(_DB_PREFIX_ . $table) . '"'
+        );
 
-        $result = Db::getInstance()->getValue(trim($query));
+        if (!$exists) {
 
-        if ($result != $column) {
-            $sql = 'ALTER TABLE `' . _DB_PREFIX_ . $table . '` ADD `' . $column . '` ' . $type . ' AFTER `' . $after . '`';
-            Db::getInstance()->execute(trim($sql));
+            /* On ne dit rien au journal des erreurs — l appel est souvent
+               conditionne a la presence d un autre plugin, et un plugin absent
+               n est pas une erreur. On le trace, ce qui suffit a le retrouver
+               quand une colonne manque a l arrivee. */
+
+            PhenyxLogger::addLog(
+                'Plugin ' . $this->name . ' : alterSqlTable(' . $table . '.' . $column
+                . ') ignore, la table ' . _DB_PREFIX_ . $table . ' n existe pas.',
+                2, null, 'Plugin', null, true
+            );
+
+            return false;
         }
 
+        $result = Db::getInstance()->getValue(
+            'SELECT `COLUMN_NAME`
+            FROM `INFORMATION_SCHEMA`.`COLUMNS`
+            WHERE `TABLE_SCHEMA` = "' . pSQL(_DB_NAME_) . '"
+            AND `TABLE_NAME` = "' . pSQL(_DB_PREFIX_ . $table) . '"
+            AND `COLUMN_NAME` = "' . pSQL($column) . '"'
+        );
+
+        if ($result == $column) {
+            return true;
+        }
+
+        return (bool) Db::getInstance()->execute(
+            'ALTER TABLE `' . bqSQL(_DB_PREFIX_ . $table) . '` ADD `' . bqSQL($column) . '` '
+            . $type . ' AFTER `' . bqSQL($after) . '`'
+        );
     }
 
     public function dropSqlColumn($table, $column) {
@@ -3227,6 +3278,97 @@ abstract class Plugin {
 
     }
 
+    /**
+     * Le libelle de l onglet dans chaque langue installee.
+     *
+     * ⚠️ CE QUE FAISAIT LA VERSION PRECEDENTE.
+     *
+     * Les deux branches d installPluginTab() — creation et mise a jour —
+     * portaient la MEME boucle, recopiee mot pour mot, et cette boucle
+     * REAFFECTAIT SON PARAMETRE `$name` :
+     *
+     *     foreach (Language::getLanguages(true) as $lang) {
+     *         if (...) {
+     *             if (!empty($_TABS[$source])) {
+     *                 $name = stripslashes($_TABS[$source]);   // <- ecrase
+     *             }
+     *         }
+     *         $tab->name[$lang['id_lang']] = $name;
+     *     }
+     *
+     * `$name` n etait donc plus le libelle de depart des le premier catalogue
+     * rencontre : toutes les langues SUIVANTES depourvues de `tab.php`
+     * heritaient de cette traduction-la. Sur io, onze langues pour trois ou
+     * quatre catalogues selon le plugin, un onglet pouvait finir intitule en
+     * neerlandais en russe — selon l ordre rendu par Language::getLanguages().
+     *
+     * Et comme `$name` etait ecrase pour de bon, le `deployPluginMeta(...,
+     * $name, 'admin')` qui suit la boucle enregistrait le titre de la page
+     * d administration dans la langue du DERNIER catalogue lu, jamais dans
+     * celle qu on lui avait passee.
+     *
+     * Le libelle de depart est desormais une variable locale que rien ne
+     * touche, et chaque langue repart de lui.
+     *
+     * @param string      $name          Libelle de depart (langue de l employe qui installe).
+     * @param string|null $source        Cle recherchee dans translations/<iso>/tab.php.
+     * @param string      $phenyxShopKey Cle de repli dans $this->_translations.
+     *
+     * @return array Libelle par id_lang.
+     */
+    protected function buildTabNames($name, $source, $phenyxShopKey) {
+
+        $names = [];
+        $default = $name;
+
+        foreach (Language::getLanguages(true) as $lang) {
+
+            /* La langue de l employe qui installe garde le libelle qu on a
+               recu : il en vient deja traduit, via translateWord(). */
+
+            if ($lang['id_lang'] == $this->context->language->id) {
+                $names[$lang['id_lang']] = $default;
+                continue;
+            }
+
+            $names[$lang['id_lang']] = $default;
+
+            $file = _EPH_PLUGIN_DIR_ . $this->name . '/translations/' . $lang['iso_code'] . '/tab.php';
+
+            if (!is_null($source) && file_exists($file)) {
+
+                /* `include` et non `include_once` : le fichier doit etre relu a
+                   chaque langue.
+
+                   Le `$_TABS = []` qui precede est une precaution contre le
+                   catalogue qui oublierait de se reinitialiser : sans lui, la
+                   langue suivante lirait les libelles de la precedente. Elle ne
+                   couvre que le cas ou le catalogue n a PAS de `global $_TABS;`
+                   — quand il en a un, l include rebranche la variable sur la
+                   globale et c est le `$_TABS = [];` du catalogue lui-meme qui
+                   fait le menage. Les catalogues de la plateforme font les
+                   deux ; la precaution est la pour ceux qui ne le feraient
+                   pas. */
+
+                $_TABS = [];
+                @include $file;
+
+                if (!empty($_TABS[$source])) {
+                    $names[$lang['id_lang']] = stripslashes($_TABS[$source]);
+                }
+
+                continue;
+            }
+
+            if (!empty($this->_translations[$lang['iso_code']]['admin'][$phenyxShopKey])) {
+                $names[$lang['id_lang']] = stripslashes($this->_translations[$lang['iso_code']]['admin'][$phenyxShopKey]);
+            }
+
+        }
+
+        return $names;
+    }
+
     public function installPluginTab($class_name, $name, $function = true, $idParent = null, $parentName = null, $position = null, $openFunction = null, $divider = 0, $fa_duatone = null, $common_function = null, $source = null) {
 
         if (is_null($parentName) && is_null($idParent)) {
@@ -3271,30 +3413,7 @@ abstract class Plugin {
             $tab->fa_duatone = $fa_duatone;
             $tab->active = 1;
             $tab->common_function = $common_function;
-            $tab->name = [];
-
-            foreach (Language::getLanguages(true) as $lang) {
-
-                if ($lang['id_lang'] != $this->context->language->id) {
-					$file = _EPH_PLUGIN_DIR_ . $this->name . '/translations/' .$lang['iso_code'] . '/tab.php';
-					if (!is_null($source) && file_exists($file)) {
-                		@include $file;
-                
-
-                		if (!empty($_TABS[$source])) {
-                    		$ret = stripslashes($_TABS[$source]);
-							$name = stripslashes($_TABS[$source]);
-                		} 
-
-            		} else if (!empty($this->_translations[$lang['iso_code']]['admin'][$PhenyxShopKey])) {
-                        $name = stripslashes($this->_translations[$lang['iso_code']]['admin'][$PhenyxShopKey]);
-                    }
-
-                }
-
-                $tab->name[$lang['id_lang']] = $name;
-
-            }
+            $tab->name = $this->buildTabNames($name, $source, $PhenyxShopKey);
 
             unset($lang);
             $result = $tab->add(true, false, true, $position);
@@ -3320,30 +3439,7 @@ abstract class Plugin {
             $tab->fa_duatone = $fa_duatone;
             $tab->active = 1;
             $tab->common_function = $common_function;
-            $tab->name = [];
-
-            foreach (Language::getLanguages(true) as $lang) {
-
-                if ($lang['id_lang'] != $this->context->language->id) {
-					$file = _EPH_PLUGIN_DIR_ . $this->name . '/translations/' .$lang['iso_code'] . '/tab.php';
-					if (!is_null($source) && file_exists($file)) {
-                		@include $file;
-                
-
-                		if (!empty($_TABS[$source])) {
-                    		$ret = stripslashes($_TABS[$source]);
-							$name = stripslashes($_TABS[$source]);
-                		} 
-
-            		} else if (!empty($this->_translations[$lang['iso_code']]['admin'][$PhenyxShopKey])) {
-                        $name = stripslashes($this->_translations[$lang['iso_code']]['admin'][$PhenyxShopKey]);
-                    }
-
-                }
-
-                $tab->name[$lang['id_lang']] = $name;
-
-            }
+            $tab->name = $this->buildTabNames($name, $source, $PhenyxShopKey);
 
             unset($lang);
             $result = $tab->update(true, false, $position);

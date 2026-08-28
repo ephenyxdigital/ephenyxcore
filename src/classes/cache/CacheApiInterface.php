@@ -56,6 +56,21 @@ interface CacheApiInterface {
 	public function cleanCache($type = '');
 
 	/**
+	 * Purge toutes les clefs commencant par $key.
+	 *
+	 * Au contrat parce que le socle l appelle sans condition — `Meta::add()`,
+	 * `update()` et `delete()` sur `metaGetPages_`. `CacheApi` en donne une
+	 * implementation par defaut qui journalise au lieu de purger : un backend
+	 * tiers qui etend `CacheApi` reste donc valide sans rien ecrire.
+	 */
+	public function cleanByStartingKey($key);
+
+	/**
+	 * Supprime une clef. Meme raison, meme filet dans `CacheApi`.
+	 */
+	public function removeData($key);
+
+	/**
 	 * Gets the class identifier of the current caching API implementation.
 	 *
 	 * @access public

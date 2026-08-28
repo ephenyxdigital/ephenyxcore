@@ -41,6 +41,7 @@ class TopMenuElements extends PhenyxObjectModel {
         'table'     => 'topmenu_elements',
         'primary'   => 'id_topmenu_elements',
         'multilang' => true,
+		'have_meta' => true,
         'fields'    => [
             'id_topmenu_column' => ['type' => self::TYPE_INT, 'required' => true],
             'type'              => ['type' => self::TYPE_INT, 'required' => true],
@@ -456,8 +457,11 @@ class TopMenuElements extends PhenyxObjectModel {
         $sql_groups_where = '';
         $file = fopen("testgetMenuColumnElements.txt", "w");
         $query = new DbQuery();
-        $query->select('ate.*, atel.*, cl.link_rewrite, cl.meta_title');
+        $query->select('ate.*, atem.*, atel.*, cl.link_rewrite, cl.meta_title');
         $query->from('topmenu_elements', 'ate');
+        /* Voir la note de TopMenuColumn::getMenuColumns() : les cibles
+           commerciales sont dans la table meta. */
+        $query->leftJoin('topmenu_elements_meta', 'atem', 'ate.`id_topmenu_elements` = atem.`id_topmenu_elements`');
         $query->leftJoin('topmenu_elements_lang', 'atel', 'ate.`id_topmenu_elements` = atel.`id_topmenu_elements` AND atel.`id_lang` = ' . (int) $id_lang);
         $query->leftJoin('cms', 'c', 'c.`id_cms` = ate.`id_cms`');
         $query->leftJoin('cms_lang', 'cl', 'c.`id_cms` = cl.`id_cms` AND cl.`id_lang` = ' . (int) $id_lang);
@@ -520,11 +524,16 @@ class TopMenuElements extends PhenyxObjectModel {
 
     public static function getElementsFromIdCategory($idCategory) {
 
+        /* `id_category` a quitte la table de base pour `topmenu_elements_meta`
+           — champ injecte par ph_ecommerce avec `meta => true`. */
+
         $sql = 'SELECT atp.`id_topmenu_elements`
         FROM `' . _DB_PREFIX_ . 'topmenu_elements` atp
+        INNER JOIN `' . _DB_PREFIX_ . 'topmenu_elements_meta` atpm
+            ON atpm.`id_topmenu_elements` = atp.`id_topmenu_elements`
         WHERE atp.`active` = 1
         AND atp.`type` = 3
-        AND atp.`id_category` = ' . (int) $idCategory;
+        AND atpm.`id_category` = ' . (int) $idCategory;
         return Db::getInstance(_EPH_USE_SQL_SLAVE_)->ExecuteS($sql);
     }
 
@@ -547,9 +556,40 @@ class TopMenuElements extends PhenyxObjectModel {
 
     public static function getIdElementCategoryDepend($id_topmenu_column, $id_category) {
 
-        return (int) Db::getInstance(_EPH_USE_SQL_SLAVE_)->getValue('SELECT `id_topmenu_elements`
-                FROM `' . _DB_PREFIX_ . 'topmenu_elements`
-                WHERE `id_column_depend` = ' . (int) $id_topmenu_column . ' AND `id_category` = ' . (int) $id_category);
+        return (int) Db::getInstance(_EPH_USE_SQL_SLAVE_)->getValue('SELECT e.`id_topmenu_elements`
+                FROM `' . _DB_PREFIX_ . 'topmenu_elements` e
+                INNER JOIN `' . _DB_PREFIX_ . 'topmenu_elements_meta` em
+                    ON em.`id_topmenu_elements` = e.`id_topmenu_elements`
+                WHERE e.`id_column_depend` = ' . (int) $id_topmenu_column . ' AND em.`id_category` = ' . (int) $id_category);
+    }
+
+    /**
+     * Les deux methodes qui suivent etaient APPELEES SANS EXISTER.
+     *
+     * `ph_ecommerce/controllers/admin/AdminTopMenuController.php` les invoque
+     * lignes 991 et 1031 pour generer un menu par marque ou par fournisseur.
+     * Elles n ont jamais ete ecrites : chacun de ces deux parcours levait donc
+     * une erreur fatale « Call to undefined method ». Constate le 2026-08-28.
+     *
+     * Elles suivent `getIdElementCategoryDepend()` a l identique, jointure sur
+     * la table meta comprise.
+     */
+    public static function getIdElementManufacturerDepend($idColumn, $idManufacturer) {
+
+        return (int) Db::getInstance(_EPH_USE_SQL_SLAVE_)->getValue('SELECT e.`id_topmenu_elements`
+                FROM `' . _DB_PREFIX_ . 'topmenu_elements` e
+                INNER JOIN `' . _DB_PREFIX_ . 'topmenu_elements_meta` em
+                    ON em.`id_topmenu_elements` = e.`id_topmenu_elements`
+                WHERE e.`id_column_depend` = ' . (int) $idColumn . ' AND em.`id_manufacturer` = ' . (int) $idManufacturer);
+    }
+
+    public static function getIdElementSupplierDepend($idColumn, $idSupplier) {
+
+        return (int) Db::getInstance(_EPH_USE_SQL_SLAVE_)->getValue('SELECT e.`id_topmenu_elements`
+                FROM `' . _DB_PREFIX_ . 'topmenu_elements` e
+                INNER JOIN `' . _DB_PREFIX_ . 'topmenu_elements_meta` em
+                    ON em.`id_topmenu_elements` = e.`id_topmenu_elements`
+                WHERE e.`id_column_depend` = ' . (int) $idColumn . ' AND em.`id_supplier` = ' . (int) $idSupplier);
     }
 
     public static function getIdElementCmsDepend($idColumn, $idCms) {
@@ -557,6 +597,40 @@ class TopMenuElements extends PhenyxObjectModel {
         return (int) Db::getInstance(_EPH_USE_SQL_SLAVE_)->getValue('SELECT `id_topmenu_elements`
                 FROM `' . _DB_PREFIX_ . 'topmenu_elements`
                 WHERE `id_column_depend` = ' . (int) $idColumn . ' AND `id_cms` = ' . (int) $idCms);
+    }
+
+
+    /**
+     * Les elements n'invalidaient RIEN : modifier une entree de sous-menu
+     * laissait le `getColumnsWrap_*` de son menu intact pendant dix jours.
+     */
+    public function add($autodate = true, $nullValues = false) {
+
+        $result = parent::add($autodate, $nullValues);
+
+        if ($result) {
+            TopMenu::flushMenuCache();
+        }
+
+        return $result;
+    }
+
+    public function update($nullValues = false) {
+
+        $result = parent::update($nullValues);
+
+        if ($result) {
+            TopMenu::flushMenuCache();
+        }
+
+        return $result;
+    }
+
+    public function delete() {
+
+        TopMenu::flushMenuCache();
+
+        return parent::delete();
     }
 
 }

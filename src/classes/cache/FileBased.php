@@ -179,6 +179,66 @@ class FileBased extends CacheApi implements CacheApiInterface {
 		return $this->_delete($key);
 	}
 
+	/**
+	 * Purge tous les fichiers dont la clef commence par $key.
+	 *
+	 * ═══ LE NOM DE FICHIER A UN PREFIXE *ET* UN SUFFIXE ═══
+	 *
+	 * `_set()`, `_get()` et `_delete()` composent tous le meme chemin :
+	 *
+	 *     <cachedir>/data_<prefix><clef sanitisee>.cache
+	 *
+	 * Trois pieces, et il faut les trois. `data_` ouvre le nom ;
+	 * `$this->prefix` isole l instance — deux sites partageant le meme
+	 * repertoire ne doivent pas se purger l un l autre ; `.cache` le ferme.
+	 * Un balayage qui oublierait le suffixe emporterait des fichiers
+	 * voisins ; un qui oublierait le prefixe viderait le cache du voisin.
+	 *
+	 * `sanitizeKey()` est un `strtr` sur neuf caracteres interdits en nom de
+	 * fichier : elle laisse intacts les alphanumeriques et l underscore, donc
+	 * un prefixe de clef reste un prefixe une fois sanitise. C est ce qui
+	 * rend la comparaison ci-dessous licite.
+	 *
+	 * `scandir()` plutot que `glob()` : une clef peut porter `[` ou `]`, que
+	 * `glob()` lirait comme une classe de caracteres.
+	 *
+	 * @param string $key Prefixe de clef, sans le prefixe d instance.
+	 * @return bool vrai si tout ce qui correspondait a ete efface.
+	 */
+	public function cleanByStartingKey($key) {
+
+		if (!is_dir($this->cachedir)) {
+			return false;
+		}
+
+		$debut = 'data_' . $this->prefix . self::sanitizeKey($key);
+		$fichiers = @scandir($this->cachedir);
+
+		if (!is_array($fichiers)) {
+			return false;
+		}
+
+		$result = true;
+
+		foreach ($fichiers as $fichier) {
+
+			if (strncmp($fichier, $debut, strlen($debut)) !== 0) {
+				continue;
+			}
+
+			if (substr($fichier, -6) !== '.cache') {
+				continue;
+			}
+
+			if (!@unlink($this->cachedir . '/' . $fichier)) {
+				$result = false;
+			}
+
+		}
+
+		return $result;
+	}
+
 	public function flush() {
 
 		return true;

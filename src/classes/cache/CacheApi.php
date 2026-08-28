@@ -368,6 +368,53 @@ abstract class CacheApi {
 	 * @access public
 	 * @return void
 	 */
+	/**
+	 * Purge toutes les clefs commencant par $key.
+	 *
+	 * ═══ POURQUOI CE DEFAUT EXISTE ═══
+	 *
+	 * Cette methode n etait implementee que par `AwsRedis` et `CacheApcu`.
+	 * `Meta::add()`, `update()` et `delete()` l appellent pourtant sans
+	 * condition sur `metaGetPages_`. Selon le backend configure, l appel
+	 * etait donc soit une purge reelle, soit une erreur fatale — et sur les
+	 * backends qui ne l ont pas, un cache jamais invalide a servi pendant
+	 * des jours une table `meta` d une version anterieure du site : le
+	 * 2026-08-28, une route pointait encore `ph_learning` longtemps apres
+	 * son renommage en `ph_elearning`, et la page ne repondait plus.
+	 *
+	 * Ce defaut ne purge rien mais le DIT. Un backend qui sait le faire
+	 * surcharge ; les autres laissent une trace, au lieu d une fatale et
+	 * surtout au lieu d un silence.
+	 *
+	 * @param string $key Prefixe de clef, sans le prefixe d instance.
+	 * @return bool
+	 */
+	public function cleanByStartingKey($key) {
+
+		PhenyxLogger::addLog(
+			'CacheApi : ' . get_class($this) . ' n implemente pas cleanByStartingKey(). '
+			. 'Les clefs commencant par « ' . $key . ' » n ont PAS ete purgees.',
+			2, null, 'CacheApi', null, true
+		);
+
+		return false;
+	}
+
+	/**
+	 * Meme filet pour `removeData()`, appelee elle aussi par Meta et par
+	 * Performer, et absente de `CacheMemcached`.
+	 */
+	public function removeData($key) {
+
+		PhenyxLogger::addLog(
+			'CacheApi : ' . get_class($this) . ' n implemente pas removeData(). '
+			. 'La clef « ' . $key . ' » n a PAS ete supprimee.',
+			2, null, 'CacheApi', null, true
+		);
+
+		return false;
+	}
+
 	public function housekeeping() {}
 
 	/**

@@ -48,7 +48,7 @@ class TopMenuColumn extends PhenyxObjectModel {
     public static $definition = [
         'table'     => 'topmenu_columns',
         'primary'   => 'id_topmenu_column',
-        'multishop' => false,
+        'have_meta' => true,
         'multilang' => true,
         'fields'    => [
             'id_topmenu_columns_wrap' => ['type' => self::TYPE_INT, 'required' => true],
@@ -402,6 +402,8 @@ class TopMenuColumn extends PhenyxObjectModel {
 
         return $return;
     }
+
+
 
     public function getFrontOutputValue() {
 
@@ -1373,7 +1375,7 @@ class TopMenuColumn extends PhenyxObjectModel {
         $result = parent::add($autodate, $nullValues);
 
         if ($result) {
-            $this->context->_session->destroy();
+            TopMenu::flushMenuCache();
         }
 
         return $result;
@@ -1384,7 +1386,7 @@ class TopMenuColumn extends PhenyxObjectModel {
         $result = parent::update($nullValues);
 
         if ($result) {
-            $this->context->_session->destroy();
+            TopMenu::flushMenuCache();
             $this->backName = $this->getBackOutputNameValue();
             $this->link_output_value = $this->getFrontOutputValue();
             $this->elements = $this->getElements();
@@ -1403,7 +1405,7 @@ class TopMenuColumn extends PhenyxObjectModel {
             $element->delete();
         }
 
-        $this->context->_session->destroy();
+        TopMenu::flushMenuCache();
         return parent::delete();
     }
 
@@ -1446,8 +1448,13 @@ class TopMenuColumn extends PhenyxObjectModel {
         $sql_groups_where = '';
 
         $query = new DbQuery();
-        $query->select('atmc.*, atmcl.*, cl.link_rewrite, cl.meta_title');
+        $query->select('atmc.*, atmcm.*, atmcl.*, cl.link_rewrite, cl.meta_title');
         $query->from('topmenu_columns', 'atmc');
+        /* `have_meta` : les cibles ajoutees par un plugin (categorie, marque,
+           fournisseur) vivent dans `topmenu_columns_meta`. Seul `load()` fait
+           cette jointure de lui-meme ; une requete ecrite a la main doit la
+           poser, sinon ces colonnes reviennent vides. */
+        $query->leftJoin('topmenu_columns_meta', 'atmcm', 'atmc.`id_topmenu_column` = atmcm.`id_topmenu_column`');
         $query->leftJoin('topmenu_columns_lang', 'atmcl', 'atmc.`id_topmenu_column` = atmcl.`id_topmenu_column` AND atmcl.`id_lang` = ' . (int) $id_lang);
         $query->leftJoin('cms', 'c', 'c.id_cms = atmc.`id_cms`');
         $query->leftJoin('cms_lang', 'cl', 'c.id_cms = cl.id_cms AND cl.id_lang = ' . (int) $id_lang);
@@ -1473,8 +1480,13 @@ class TopMenuColumn extends PhenyxObjectModel {
     public static function getMenuColumsByIdMenu($id_menu, $id_lang, $active = true, $groupRestrict = false) {
 
         $query = new DbQuery();
-        $query->select('atmc.*, atmcl.*, cl.link_rewrite, cl.meta_title');
+        $query->select('atmc.*, atmcm.*, atmcl.*, cl.link_rewrite, cl.meta_title');
         $query->from('topmenu_columns', 'atmc');
+        /* `have_meta` : les cibles ajoutees par un plugin (categorie, marque,
+           fournisseur) vivent dans `topmenu_columns_meta`. Seul `load()` fait
+           cette jointure de lui-meme ; une requete ecrite a la main doit la
+           poser, sinon ces colonnes reviennent vides. */
+        $query->leftJoin('topmenu_columns_meta', 'atmcm', 'atmc.`id_topmenu_column` = atmcm.`id_topmenu_column`');
         $query->leftJoin('topmenu_columns_lang', 'atmcl', 'atmc.`id_topmenu_column` = atmcl.`id_topmenu_column` AND atmcl.`id_lang` = ' . (int) $id_lang);
         $query->leftJoin('cms', 'c', 'c.`id_cms` = atmc.`id_cms`');
         $query->leftJoin('cms_lang', 'cl', 'c.id_cms = cl.id_cms AND cl.id_lang = ' . (int) $id_lang);
