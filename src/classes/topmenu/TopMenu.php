@@ -1704,7 +1704,7 @@ class TopMenu extends PhenyxObjectModel {
         . '_' . (int) $id_lang
         . '_' . ($active ? 1 : 0);
 
-        $topMenus = $this->_session->get($key);
+        $topMenus =  $this->_session->get($key);
 
         if (empty($topMenus)) {
             $topMenus = [];

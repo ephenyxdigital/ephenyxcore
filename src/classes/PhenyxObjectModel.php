@@ -1071,13 +1071,42 @@ abstract class PhenyxObjectModel implements Core_Foundation_Database_EntityInter
         }
         
         if (isset($this->def['have_meta']) && $this->def['have_meta']) {
-            
-            $sql = 'REPLACE INTO `' . _DB_PREFIX_ . $this->def['table'].'_meta` (' . pSQL($this->def['primary']) . ') VALUES ('.$this->id.')';
-            Db::getInstance()->execute($sql);       
-            if (!$result &= Db::getInstance()->update($this->def['table']. '_meta', $this->getFieldsMeta(), '`' . pSQL($this->def['primary']) . '` = ' . (int) $this->id, 0, $nullValues)) {
+
+            /*
+             * ═══ VALIDER AVANT D ECRIRE (corrige le 2026-08-29) ═══
+             *
+             * L ordre etait inverse. Le REPLACE INTO creait la ligne `_meta`,
+             * PUIS getFieldsMeta() appelait validateFieldsMeta() — qui ne rend
+             * pas false sur un champ invalide : elle appelle `die()` avec un
+             * JSON d erreur. Une creation refusee laissait donc derriere elle
+             * une ligne `_meta` ORPHELINE, garnie des seules valeurs par defaut
+             * de la table, et la requete mourait avant tout nettoyage.
+             *
+             * Constate en reel le 29/08/2026 : `eph_product_meta` portait six
+             * lignes (21 a 26) sans produit correspondant dans `eph_product`,
+             * toutes identiques — is_education = 0, course_type = 'course',
+             * pass_score = 70. Les defauts de la table, jamais renseignes par
+             * l UPDATE qui n avait jamais eu lieu. Signature exacte d une ligne
+             * creee par le REPLACE et abandonnee aussitot.
+             *
+             * Le declencheur : validateFieldsMeta() ne validait RIEN jusqu au
+             * 28/08 (sa condition etait inversee, cf. le commentaire de la
+             * methode). En la reparant, on a reveille ce defaut-ci, plus ancien
+             * et jusque-la sans consequence.
+             *
+             * getFieldsMeta() valide : on l appelle donc EN PREMIER. Si elle
+             * refuse, rien n a encore ete ecrit.
+             */
+
+            $fieldsMeta = $this->getFieldsMeta();
+
+            $sql = 'REPLACE INTO `' . _DB_PREFIX_ . $this->def['table'] . '_meta` ('
+            . pSQL($this->def['primary']) . ') VALUES (' . (int) $this->id . ')';
+            Db::getInstance()->execute($sql);
+
+            if (!$result &= Db::getInstance()->update($this->def['table'] . '_meta', $fieldsMeta, '`' . pSQL($this->def['primary']) . '` = ' . (int) $this->id, 0, $nullValues)) {
                 return false;
             }
-          
 
         }
 

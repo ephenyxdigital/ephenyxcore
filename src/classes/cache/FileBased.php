@@ -239,9 +239,20 @@ class FileBased extends CacheApi implements CacheApiInterface {
 		return $result;
 	}
 
+	/**
+	 * ═══ CETTE METHODE NE VIDAIT RIEN ═══
+	 *
+	 * Le corps etait `return true;`. Elle annoncait donc un succes sans avoir
+	 * touche un seul fichier. `PageCache::flush()` l appelle en croyant vider
+	 * le cache (PageCache.php l.160) : seul le `DELETE FROM page_cache` qui
+	 * suit avait un effet, et le repertoire restait entier.
+	 *
+	 * `cleanCache('')` fait le vrai travail — GlobIterator sur `*.cache` dans
+	 * `$this->cachedir` — et invalide la cle de version au passage.
+	 */
 	public function flush() {
 
-		return true;
+		return (bool) $this->cleanCache();
 	}
 
 	protected function _delete($key) {
