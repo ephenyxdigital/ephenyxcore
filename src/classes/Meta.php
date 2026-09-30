@@ -141,6 +141,7 @@ class Meta extends PhenyxObjectModel {
                 'footer',
                 'header',
                 'pfgmodel',
+				'pfg',
             ];
             $extraPages = $context->_hook->exec('actionMetaGetExtraPages', [], null, true);
 

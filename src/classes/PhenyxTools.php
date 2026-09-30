@@ -1356,6 +1356,45 @@ class PhenyxTools {
 		$offset = $maxId + 1;
 		$hasAccess = $this->tableExists('employee_access');
 
+		// ── Orphelins des tables satellites — A PURGER AVANT LA PHASE A.
+		//
+		// back_tab_lang (PK id_back_tab + id_lang) et employee_access (PK
+		// id_profile + id_back_tab) n'ont pas de cle etrangere vers back_tab :
+		// quand un onglet disparait, ses lignes satellites restent. Deux effets :
+		//
+		//  - elles ne sont jamais renumerotees, puisque la boucle ne parcourt que
+		//    les onglets EXISTANTS ;
+		//  - « offset > maxId » ne garantit l'absence de collision que pour les
+		//    ids presents dans back_tab. Un orphelin dont l'id depasse maxId se
+		//    trouve deja DANS la plage temporaire (offset+1 .. offset+n), et
+		//    l'UPDATE de la phase A heurte alors la cle primaire.
+		//
+		// Constate le 2026-09-09 : « UPDATE eph_employee_access SET id_back_tab
+		// = 97 WHERE id_back_tab = 9 » refuse — un profil possedait deja une
+		// ligne pour l'onglet 97, supprime depuis longtemps.
+		//
+		// Ces lignes ne designent plus rien : on les retire. Apres quoi tout
+		// id_back_tab satellite est <= maxId < offset, et la transition est sure.
+		$this->exec(
+			'DELETE FROM `' . _DB_PREFIX_ . 'back_tab_lang`'
+			. ' WHERE `id_back_tab` NOT IN (SELECT `id_back_tab` FROM `' . _DB_PREFIX_ . 'back_tab`)',
+			$result
+		);
+
+		if ($hasAccess) {
+			$this->exec(
+				'DELETE FROM `' . _DB_PREFIX_ . 'employee_access`'
+				. ' WHERE `id_back_tab` NOT IN (SELECT `id_back_tab` FROM `' . _DB_PREFIX_ . 'back_tab`)',
+				$result
+			);
+		}
+
+		// Inutile d'aller plus loin si la purge a echoue : la phase A
+		// rencontrerait le meme doublon, avec un message moins parlant.
+		if (!$result) {
+			return false;
+		}
+
 		// Retrait de l'AUTO_INCREMENT pour réassigner librement (la PK reste).
 
 		// Phase A : tout vers (new_id + offset) ; id_parent remappé identiquement.

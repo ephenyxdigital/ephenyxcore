@@ -2939,7 +2939,8 @@ abstract class Plugin {
 
         Db::getInstance()->execute('UPDATE `' . _DB_PREFIX_ . 'plugin` SET `active` = 0 WHERE `id_plugin` = ' . $this->id);
         $this->updateIoPlugins();
-        $this->inActivateTab();
+        
+		return $this->inActivateTab();
     }
 
     public function uninstall() {
@@ -3457,16 +3458,19 @@ abstract class Plugin {
                 ->from('back_tab')
                 ->where('`plugin` = \'' . pSQL($this->name) . '\'')
         );
+		
+		$result = true;
 
         if (is_array($tabs) && count($tabs)) {
 
             foreach ($tabs as $tab) {
                 $menu = new BackTab($tab['id_back_tab']);
                 $menu->active = false;
-                $menu->update();
+                $result &= $menu->update();
             }
 
         }
+		return $result;
 
     }
 
