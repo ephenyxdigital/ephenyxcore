@@ -501,6 +501,7 @@ class Performer {
             if (isset($this->cache_routes[$this->context->language->id])
                 && array_key_exists($request_uri_clean, $this->cache_routes[$this->context->language->id])
             ) {
+
                 $this->context->cache_api->putData($cacheId, $this->controller, 864000);
             }
 
@@ -759,7 +760,7 @@ class Performer {
                 if ($row['url_rewrite']) {
                     $this->addRoute(
                         $row['page'],
-                        (!defined('_BACK_MODE_') && ($row['controller'] == 'admin')) ? 'backend/' . $row['url_rewrite'] : $row['url_rewrite'],
+                        ((!defined('_BACK_MODE_') || defined('_BACK_MODE_') != false) && ($row['controller'] == 'admin')) ? 'backend/' . $row['url_rewrite'] : $row['url_rewrite'],
                         $row['page'],
                         $row['id_lang'],
                         [],
